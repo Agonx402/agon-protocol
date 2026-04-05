@@ -1,0 +1,225 @@
+#!/bin/bash
+
+set -e
+
+bootstrap_tooling_path() {
+  PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
+
+  if [[ -f "$HOME/.cargo/env" ]]; then
+    # shellcheck disable=SC1090
+    source "$HOME/.cargo/env"
+  fi
+
+  local candidate
+
+  for candidate in \
+    "$HOME/.local/share/solana/install/active_release/bin" \
+    "$HOME/.local/share/solana/install/releases/"*/solana-release/bin
+  do
+    if [[ -d "$candidate" && ":$PATH:" != *":$candidate:"* ]]; then
+      PATH="$candidate:$PATH"
+    fi
+  done
+
+  if ! command -v node >/dev/null 2>&1; then
+    local latest_node
+    latest_node=$(find "$HOME/.nvm/versions/node" -maxdepth 3 -type f -name node 2>/dev/null | sort -V | tail -1 || true)
+    if [[ -n "$latest_node" ]]; then
+      candidate="$(dirname "$latest_node")"
+      if [[ ":$PATH:" != *":$candidate:"* ]]; then
+        PATH="$candidate:$PATH"
+      fi
+    fi
+  fi
+
+  export PATH
+}
+
+bootstrap_tooling_path
+
+sync_anchor_program_ids() {
+  local program_id="$1"
+  local anchor_toml="Anchor.toml"
+
+  for cluster in devnet localnet mainnet; do
+    sed -i "/^\[programs\.$cluster\]$/{
+      n
+      s/^agon_protocol = \".*\"$/agon_protocol = \"$program_id\"/
+    }" "$anchor_toml"
+  done
+}
+
+# Default network
+NETWORK="devnet"
+FRESH_PROGRAM_ID="false"
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --network=*)
+      NETWORK="${1#*=}"
+      shift
+      ;;
+    --network)
+      NETWORK="$2"
+      shift 2
+      ;;
+    --fresh-program-id)
+      FRESH_PROGRAM_ID="true"
+      shift
+      ;;
+    *)
+      echo "Unknown option: $1"
+      echo "Usage: $0 [--network=devnet|mainnet] [--fresh-program-id]"
+      exit 1
+      ;;
+  esac
+done
+
+# Validate network
+if [[ "$NETWORK" != "devnet" && "$NETWORK" != "mainnet" ]]; then
+  echo "❌ Invalid network: $NETWORK"
+  echo "Supported networks: devnet, mainnet"
+  exit 1
+fi
+
+# Setup wallet using the setup-wallet.sh script
+echo "🔑 Setting up wallet..."
+if [[ ! -d "keys" ]]; then
+  mkdir -p keys
+fi
+
+./scripts/setup-wallet.sh $NETWORK
+if [[ $? -ne 0 ]]; then
+  echo "❌ Failed to setup wallet."
+  exit 1
+fi
+
+# Set the wallet path for this deployment
+WALLET_FILE="keys/${NETWORK}-deployer.json"
+if [[ ! -f "$WALLET_FILE" ]]; then
+  echo "❌ Wallet file $WALLET_FILE not found."
+  exit 1
+fi
+
+NODE_BIN="$(command -v node || true)"
+if [[ -z "$NODE_BIN" ]]; then
+  echo "❌ Node.js is required but was not found in PATH."
+  exit 1
+fi
+
+echo "🚀 Starting Agon Protocol deployment to $NETWORK..."
+
+if [[ "$FRESH_PROGRAM_ID" == "true" ]]; then
+  echo "🆕 Generating a fresh program id to avoid stale onchain state..."
+  mkdir -p target/deploy
+  solana-keygen new --no-bip39-passphrase -o target/deploy/agon_protocol-keypair.json -f >/dev/null
+  anchor keys sync >/dev/null
+  FRESH_PROGRAM_ID_VALUE="$(solana address -k target/deploy/agon_protocol-keypair.json)"
+  sync_anchor_program_ids "$FRESH_PROGRAM_ID_VALUE"
+  echo "📋 Fresh program id: $FRESH_PROGRAM_ID_VALUE"
+fi
+
+# Step 0: Check wallet balance and provide funding instructions
+echo "💰 Checking wallet balance..."
+if [[ "$NETWORK" == "devnet" ]]; then
+  BALANCE=$(solana balance "$WALLET_FILE" --url https://api.devnet.solana.com --keypair "$WALLET_FILE" 2>/dev/null | grep -oP '\d+\.\d+' || echo "0")
+  echo "Current balance: $BALANCE SOL"
+  if (( $(echo "$BALANCE < 2" | bc -l 2>/dev/null || echo "1") )); then
+    echo "⚠️  Insufficient funds for deployment. You need at least 2 SOL."
+    echo "🪂 To get devnet SOL, visit: https://faucet.solana.com/"
+    echo "   Or run: solana airdrop 2 --url https://api.devnet.solana.com --keypair $WALLET_FILE"
+    echo "   (Note: Devnet airdrops may be rate-limited)"
+    echo ""
+    read -p "Press Enter after funding your wallet to continue..."
+  fi
+elif [[ "$NETWORK" == "mainnet" ]]; then
+  echo "⚠️  WARNING: Make sure your wallet has sufficient SOL for mainnet deployment!"
+  echo "💰 Check your balance: solana balance $WALLET_FILE --url https://api.mainnet-beta.solana.com --keypair $WALLET_FILE"
+  echo "   You need ~2-3 SOL for deployment + initialization."
+  read -p "Press Enter to continue with mainnet deployment..."
+fi
+
+# Step 1: Run verification
+echo "🔍 Running verification..."
+cargo fmt --all
+cargo clippy --lib --features no-entrypoint -- -D warnings
+anchor build
+
+# Step 2: Deploy to specified network
+echo "📦 Deploying to $NETWORK..."
+if [[ "$NETWORK" == "devnet" ]]; then
+  ANCHOR_PROVIDER_URL="https://api.devnet.solana.com" anchor deploy --provider.cluster devnet --provider.wallet "$WALLET_FILE"
+elif [[ "$NETWORK" == "mainnet" ]]; then
+  ANCHOR_PROVIDER_URL="https://api.mainnet-beta.solana.com" anchor deploy --provider.cluster mainnet-beta --provider.wallet "$WALLET_FILE"
+fi
+
+# Step 3: Initialize the program and capture config
+echo "⚙️  Initializing program..."
+INIT_ARGS=()
+if [[ -n "${AGON_ALLOWLIST_TOKENS:-}" ]]; then
+  echo "🪙 Passing AGON_ALLOWLIST_TOKENS to initializer"
+  INIT_ARGS+=(--allowlisted-tokens-json "$AGON_ALLOWLIST_TOKENS")
+fi
+if [[ -n "${AGON_FEE_RECIPIENT:-}" ]]; then
+  echo "💼 Passing AGON_FEE_RECIPIENT to initializer"
+  INIT_ARGS+=(--fee-recipient "$AGON_FEE_RECIPIENT")
+fi
+if [[ -n "${AGON_INITIAL_AUTHORITY:-}" ]]; then
+  echo "🛡️ Passing AGON_INITIAL_AUTHORITY to initializer"
+  INIT_ARGS+=(--initial-authority "$AGON_INITIAL_AUTHORITY")
+fi
+if [[ "$NETWORK" == "devnet" ]]; then
+  CONFIG_OUTPUT=$(env ANCHOR_PROVIDER_URL="https://api.devnet.solana.com" ANCHOR_WALLET="$WALLET_FILE" "$NODE_BIN" node_modules/ts-node/dist/bin.js scripts/initialize-program.ts "${INIT_ARGS[@]}" 2>&1)
+elif [[ "$NETWORK" == "mainnet" ]]; then
+  CONFIG_OUTPUT=$(env ANCHOR_PROVIDER_URL="https://api.mainnet-beta.solana.com" ANCHOR_WALLET="$WALLET_FILE" "$NODE_BIN" node_modules/ts-node/dist/bin.js scripts/initialize-program.ts "${INIT_ARGS[@]}" 2>&1)
+fi
+
+echo "$CONFIG_OUTPUT"
+
+# Extract JSON config from output (find the JSON object)
+CONFIG_JSON=$(echo "$CONFIG_OUTPUT" | sed -n '/^{/,/^}/p')
+
+if [[ -n "${AGON_ALLOWLIST_TOKENS:-}" ]]; then
+  if [[ -z "$CONFIG_JSON" || "$CONFIG_JSON" == "{}" ]]; then
+    echo "❌ Initializer did not emit deployment JSON, so the requested token allowlist could not be verified."
+    exit 1
+  fi
+
+  if ! CONFIG_JSON="$CONFIG_JSON" AGON_ALLOWLIST_TOKENS="$AGON_ALLOWLIST_TOKENS" "$NODE_BIN" - <<'NODE'
+const config = JSON.parse(process.env.CONFIG_JSON ?? "{}");
+const requested = JSON.parse(process.env.AGON_ALLOWLIST_TOKENS ?? "[]");
+const actualIds = new Set((config.tokens ?? []).map((token) => token.id));
+const missing = requested.filter((token) => !actualIds.has(token.id));
+
+if (missing.length > 0) {
+  console.error(
+    `❌ Initializer completed without registering requested token ids: ${missing
+      .map((token) => token.id)
+      .join(", ")}`
+  );
+  process.exit(1);
+}
+NODE
+  then
+    exit 1
+  fi
+fi
+
+if [[ -n "$CONFIG_JSON" && "$CONFIG_JSON" != "{}" ]]; then
+  # Create config directory if it doesn't exist
+  mkdir -p config
+
+  # Save deployment config
+  CONFIG_FILE="config/${NETWORK}-deployment.json"
+  echo "$CONFIG_JSON" > "$CONFIG_FILE"
+  echo "💾 Deployment config saved to: $CONFIG_FILE"
+fi
+
+echo "🎉 Deployment and initialization complete!"
+echo "🌐 Network: $NETWORK"
+echo "📋 Program ID: $(solana address -k target/deploy/agon_protocol-keypair.json)"
+
+if [[ -f "config/${NETWORK}-deployment.json" ]]; then
+  echo "📄 Config file: config/${NETWORK}-deployment.json"
+fi

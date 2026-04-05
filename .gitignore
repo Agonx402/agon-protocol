@@ -1,0 +1,19 @@
+.anchor
+.DS_Store
+target
+**/*.rs.bk
+node_modules
+test-ledger
+.yarn
+yarn-error.log
+npm-debug.log*
+package-lock.json
+yarn.lock
+# Deployment configurations (keep README and .gitkeep, ignore actual configs)
+config/
+!config/README.md
+!config/.gitkeep
+
+# Keys (keep examples, ignore actual keys)
+keys/
+.env

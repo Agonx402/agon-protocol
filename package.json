@@ -1,0 +1,32 @@
+{
+  "license": "ISC",
+  "scripts": {
+    "lint:fix": "prettier */*.js \"*/**/*{.js,.ts}\" -w",
+    "lint": "prettier */*.js \"*/**/*{.js,.ts}\" --check",
+    "verify": "cargo fmt && cargo clippy -- -D warnings && anchor build",
+    "verify:full": "cargo fmt && cargo clippy -- -D warnings && anchor build && anchor test --skip-local-validator",
+    "test:local:prepare": "./scripts/prepare-local-test-suite.sh",
+    "deploy": "./scripts/deploy.sh",
+    "deploy:devnet": "./scripts/deploy.sh --network=devnet",
+    "deploy:mainnet": "./scripts/deploy.sh --network=mainnet",
+    "setup:wallet": "./scripts/setup-wallet.sh",
+    "demo:agon-protocol": "./scripts/agon-protocol-demo.sh"
+  },
+  "dependencies": {
+    "@coral-xyz/anchor": "^0.32.1",
+    "@solana/spl-token": "^0.4.8",
+    "@solana/web3.js": "^1.95.3",
+    "glob": "^13.0.6"
+  },
+  "devDependencies": {
+    "@types/bn.js": "^5.1.0",
+    "@types/chai": "^4.3.0",
+    "@types/mocha": "^9.0.0",
+    "chai": "^4.3.4",
+    "mocha": "^9.0.3",
+    "prettier": "^2.6.2",
+    "ts-mocha": "^10.0.0",
+    "ts-node": "^10.9.1",
+    "typescript": "^5.7.3"
+  }
+}
