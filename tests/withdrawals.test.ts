@@ -1,10 +1,11 @@
 import * as anchor from "@coral-xyz/anchor";
-import { PublicKey } from "@solana/web3.js";
+import { Ed25519Program, PublicKey } from "@solana/web3.js";
 import { TOKEN_PROGRAM_ID, getAccount } from "@solana/spl-token";
 import { expect } from "chai";
 import {
   program,
   provider,
+  primaryMint,
   user1,
   user1TokenAccount,
   feeRecipientTokenAccount,
@@ -15,6 +16,10 @@ import {
   registerTestToken,
   createFundedTokenAccount,
   getFeeRecipientTokenAccount,
+  createTestParticipant,
+  ensureChannel,
+  createCommitmentMessage,
+  expectProgramError,
 } from "./shared/setup";
 
 const SECOND_WITHDRAWAL_TOKEN_ID = 12;
@@ -234,5 +239,205 @@ describe("Withdrawal", () => {
     expect(Number(destinationAfter - destinationBefore)).to.equal(3_950_000);
     expect(Number(feeRecipientAfter - feeRecipientBefore)).to.equal(50_000);
     expect(Number(vaultBefore - vaultAfter)).to.equal(4_000_000);
+  });
+
+  it("deposit rejects token accounts whose mint does not match the requested token id", async () => {
+    const participant = await createTestParticipant();
+    const secondToken = await registerTestToken(SECOND_WITHDRAWAL_TOKEN_ID, "PYUSD");
+    const wrongMintAccount = await createFundedTokenAccount(
+      participant.wallet,
+      secondToken.mint,
+      2_000_000
+    );
+
+    await expectProgramError(
+      () =>
+        program.methods
+          .deposit(1, new anchor.BN(1_000_000))
+          .accounts({
+            owner: participant.wallet.publicKey,
+            participantAccount: participant.participantPda,
+            ownerTokenAccount: wrongMintAccount,
+            vaultTokenAccount: findVaultTokenAccountPda(1),
+          } as any)
+          .signers([participant.wallet])
+          .rpc(),
+      "InvalidTokenMint"
+    );
+  });
+
+  it("deposit_for rejects funder token accounts whose mint does not match the requested token id", async () => {
+    const participant = await createTestParticipant();
+    const secondToken = await registerTestToken(SECOND_WITHDRAWAL_TOKEN_ID, "PYUSD");
+    const wrongMintAccount = await createFundedTokenAccount(
+      participant.wallet,
+      secondToken.mint,
+      2_000_000
+    );
+
+    await expectProgramError(
+      () =>
+        program.methods
+          .depositFor(1, [new anchor.BN(1_000_000)])
+          .accounts({
+            funderTokenAccount: wrongMintAccount,
+            funder: participant.wallet.publicKey,
+          } as any)
+          .remainingAccounts([
+            {
+              pubkey: participant.participantPda,
+              isSigner: false,
+              isWritable: true,
+            },
+          ])
+          .signers([participant.wallet])
+          .rpc(),
+      "InvalidTokenMint"
+    );
+  });
+
+  it("request_withdrawal rejects destination token accounts whose mint does not match the requested token id", async () => {
+    const participant = await createTestParticipant();
+    const tokenAccount = await createFundedTokenAccount(
+      participant.wallet,
+      primaryMint,
+      3_000_000
+    );
+    const secondToken = await registerTestToken(SECOND_WITHDRAWAL_TOKEN_ID, "PYUSD");
+    const wrongDestination = await createFundedTokenAccount(
+      participant.wallet,
+      secondToken.mint,
+      0
+    );
+
+    await program.methods
+      .deposit(1, new anchor.BN(2_000_000))
+      .accounts({
+        owner: participant.wallet.publicKey,
+        participantAccount: participant.participantPda,
+        ownerTokenAccount: tokenAccount,
+        vaultTokenAccount: findVaultTokenAccountPda(1),
+      } as any)
+      .signers([participant.wallet])
+      .rpc();
+
+    await expectProgramError(
+      () =>
+        program.methods
+          .requestWithdrawal(1, new anchor.BN(1_000_000), wrongDestination)
+          .accounts({
+            owner: participant.wallet.publicKey,
+            participantAccount: participant.participantPda,
+            withdrawalDestination: wrongDestination,
+          } as any)
+          .signers([participant.wallet])
+          .rpc(),
+      "InvalidTokenMint"
+    );
+  });
+
+  it("clears a pending withdrawal with zero payout when settlement fully drains it during the timelock", async () => {
+    const payer = await createTestParticipant();
+    const payee = await createTestParticipant();
+    const payerTokenAccount = await createFundedTokenAccount(
+      payer.wallet,
+      primaryMint,
+      4_000_000
+    );
+    const { channelPda, payerParticipantPda, payeeParticipantPda, channel } =
+      await ensureChannel(payer.wallet, payee.wallet.publicKey, 1);
+    const withdrawAmount = 2_000_000;
+
+    await program.methods
+      .deposit(1, new anchor.BN(withdrawAmount))
+      .accounts({
+        owner: payer.wallet.publicKey,
+        participantAccount: payerParticipantPda,
+        ownerTokenAccount: payerTokenAccount,
+        vaultTokenAccount: findVaultTokenAccountPda(1),
+      } as any)
+      .signers([payer.wallet])
+      .rpc();
+
+    await program.methods
+      .requestWithdrawal(1, new anchor.BN(withdrawAmount), payerTokenAccount)
+      .accounts({
+        owner: payer.wallet.publicKey,
+        participantAccount: payerParticipantPda,
+        withdrawalDestination: payerTokenAccount,
+      } as any)
+      .signers([payer.wallet])
+      .rpc();
+
+    const commitmentMessage = createCommitmentMessage({
+      payerId: channel.payerId,
+      payeeId: channel.payeeId,
+      committedAmount: new anchor.BN(withdrawAmount),
+      tokenId: 1,
+    });
+    const ed25519Ix = Ed25519Program.createInstructionWithPrivateKey({
+      privateKey: payer.wallet.secretKey,
+      message: commitmentMessage,
+    });
+
+    await program.methods
+      .settleIndividual()
+      .accounts({
+        channelState: channelPda,
+        payerAccount: payerParticipantPda,
+        payeeAccount: payeeParticipantPda,
+        submitter: payee.wallet.publicKey,
+      } as any)
+      .preInstructions([ed25519Ix])
+      .signers([payee.wallet])
+      .rpc();
+
+    const payerAfterSettlement = await program.account.participantAccount.fetch(
+      payerParticipantPda
+    );
+    const drainedBalance = getTokenBalance(payerAfterSettlement, 1);
+    expect(drainedBalance.availableBalance.toNumber()).to.equal(0);
+    expect(drainedBalance.withdrawingBalance.toNumber()).to.equal(0);
+    expect(drainedBalance.withdrawalUnlockAt.toNumber()).to.be.greaterThan(0);
+
+    await sleep(3500);
+
+    const destinationBefore = (await getAccount(provider.connection, payerTokenAccount)).amount;
+    const feeRecipientBefore = (
+      await getAccount(provider.connection, feeRecipientTokenAccount)
+    ).amount;
+    const vaultBefore = (
+      await getAccount(provider.connection, findVaultTokenAccountPda(1))
+    ).amount;
+
+    await program.methods
+      .executeWithdrawalTimelocked(1)
+      .accounts({
+        participantAccount: payerParticipantPda,
+        withdrawalDestination: payerTokenAccount,
+        feeRecipientTokenAccount: feeRecipientTokenAccount,
+      } as any)
+      .rpc();
+
+    const destinationAfter = (await getAccount(provider.connection, payerTokenAccount)).amount;
+    const feeRecipientAfter = (
+      await getAccount(provider.connection, feeRecipientTokenAccount)
+    ).amount;
+    const vaultAfter = (
+      await getAccount(provider.connection, findVaultTokenAccountPda(1))
+    ).amount;
+    const payerAfterExecution = await program.account.participantAccount.fetch(
+      payerParticipantPda
+    );
+    const clearedBalance = getTokenBalance(payerAfterExecution, 1);
+
+    expect(Number(destinationAfter - destinationBefore)).to.equal(0);
+    expect(Number(feeRecipientAfter - feeRecipientBefore)).to.equal(0);
+    expect(Number(vaultBefore - vaultAfter)).to.equal(0);
+    expect(clearedBalance.withdrawingBalance.toNumber()).to.equal(0);
+    expect(clearedBalance.withdrawalUnlockAt.toNumber()).to.equal(0);
+    expect(clearedBalance.withdrawalDestination.toString()).to.equal(
+      PublicKey.default.toString()
+    );
   });
 });

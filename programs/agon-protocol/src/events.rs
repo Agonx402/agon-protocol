@@ -9,33 +9,46 @@ pub struct ParticipantInitialized {
 }
 
 #[event]
-pub struct ParticipantClosed {
-    pub participant_id: u32,
-    pub owner: Pubkey,
-}
-
-#[event]
 pub struct InboundChannelPolicyUpdated {
     pub participant_id: u32,
     pub inbound_channel_policy: u8,
 }
 
 #[event]
-pub struct ChannelCloseRequested {
+pub struct ChannelUnlockRequested {
     pub payer_id: u32,
     pub payee_id: u32,
     pub token_id: u16,
+    pub requested_amount: u64,
     pub unlock_at: i64,
 }
 
 #[event]
-pub struct ChannelClosed {
+pub struct ChannelFundsUnlocked {
     pub payer_id: u32,
     pub payee_id: u32,
     pub token_id: u16,
-    pub lane_generation: u32,
-    pub final_settled_cumulative: u64,
-    pub returned_collateral: u64,
+    pub released_amount: u64,
+    pub remaining_locked: u64,
+}
+
+#[event]
+pub struct ChannelAuthorizedSignerUpdateRequested {
+    pub payer_id: u32,
+    pub payee_id: u32,
+    pub token_id: u16,
+    pub current_authorized_signer: Pubkey,
+    pub pending_authorized_signer: Pubkey,
+    pub activate_at: i64,
+}
+
+#[event]
+pub struct ChannelAuthorizedSignerUpdated {
+    pub payer_id: u32,
+    pub payee_id: u32,
+    pub token_id: u16,
+    pub previous_authorized_signer: Pubkey,
+    pub new_authorized_signer: Pubkey,
 }
 
 #[event]
@@ -43,7 +56,6 @@ pub struct ChannelCreated {
     pub payer_id: u32,
     pub payee_id: u32,
     pub token_id: u16,
-    pub lane_generation: u32,
 }
 
 #[event]
@@ -124,7 +136,6 @@ pub struct IndividualSettled {
     pub payer_id: u32,
     pub payee_id: u32,
     pub token_id: u16,
-    pub lane_generation: u32,
     pub amount: u64,
     pub committed_amount: u64,
     pub from_locked: bool,

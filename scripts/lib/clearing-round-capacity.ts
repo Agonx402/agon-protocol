@@ -16,7 +16,7 @@ const DEFAULT_BLS_AGGREGATE_SIGNATURE_BYTES = 96;
 const TOKEN_REGISTRY_SEED = "token-registry";
 const GLOBAL_CONFIG_SEED = "global-config";
 const SYNTHETIC_RECENT_BLOCKHASH = "11111111111111111111111111111111";
-const SYNTHETIC_MESSAGE_DOMAIN = Buffer.from("agon-capacity-v3", "utf8");
+const SYNTHETIC_MESSAGE_DOMAIN = Buffer.from("agon-capacity-v4", "utf8");
 
 export type ClearingRoundCapacityMode =
   | "current-ed25519"
@@ -51,7 +51,6 @@ type SyntheticBlock = {
   participantId: number;
   entries: {
     payeeRef: number;
-    laneGeneration: number;
     channelAccount: PublicKey;
   }[];
 };
@@ -124,7 +123,6 @@ function buildSyntheticRound(
     channelAccounts.push(channelAccount);
     blocks[payerIndex].entries.push({
       payeeRef: payeeIndex,
-      laneGeneration: channelIndex + 1,
       channelAccount,
     });
   }
@@ -159,7 +157,6 @@ function createClearingRoundMessage(blocks: SyntheticBlock[]): Buffer {
 
     for (const entry of block.entries) {
       dynamicParts.push(entry.payeeRef & 0xff);
-      dynamicParts.push(...encodeCompactU64(BigInt(entry.laneGeneration)));
       dynamicParts.push(
         ...encodeCompactU64(BigInt(1_000_000 + dynamicParts.length))
       );
@@ -167,7 +164,7 @@ function createClearingRoundMessage(blocks: SyntheticBlock[]): Buffer {
   }
 
   return Buffer.concat([
-    Buffer.from([0x02, 0x03]),
+    Buffer.from([0x02, 0x04]),
     SYNTHETIC_MESSAGE_DOMAIN,
     Buffer.from([0x01, 0x00]),
     Buffer.from([blocks.length & 0xff]),

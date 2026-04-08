@@ -19,6 +19,7 @@ import "./channels.test";
 
 // Settlement tests
 import "./settlements.test";
+import "./message-v4.test";
 
 // Error condition tests (tests that are expected to fail)
 import "./errors.test";

@@ -32,7 +32,6 @@ pub fn handler(
     chain_id: u16,
     fee_bps: u16,
     registration_fee_lamports: u64,
-    message_domain: [u8; 16],
     initial_authority: Option<Pubkey>,
 ) -> Result<()> {
     require!(
@@ -50,18 +49,16 @@ pub fn handler(
                 .contains(&registration_fee_lamports),
         VaultError::InvalidRegistrationFee
     );
-    require!(
-        message_domain != [0u8; 16],
-        VaultError::InvalidMessageDomain
-    );
     let (authority, pending_authority) =
         resolve_bootstrap_authorities(ctx.accounts.upgrade_authority.key(), initial_authority)?;
+    let withdrawal_timelock_seconds = GlobalConfig::timelock_for_chain_id(chain_id)?;
+    let message_domain = GlobalConfig::derive_message_domain(ctx.program_id, chain_id);
 
     let config = &mut ctx.accounts.global_config;
     config.authority = authority;
     config.fee_recipient = ctx.accounts.fee_recipient.key();
     config.fee_bps = fee_bps;
-    config.withdrawal_timelock_seconds = GlobalConfig::timelock_for_chain_id(chain_id)?;
+    config.withdrawal_timelock_seconds = withdrawal_timelock_seconds;
     config.registration_fee_lamports = registration_fee_lamports;
     config.next_participant_id = 0;
     config.bump = ctx.bumps.global_config;

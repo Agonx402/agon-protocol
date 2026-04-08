@@ -9,7 +9,6 @@ import {
   upgradeAuthority,
   expectProgramError,
   TEST_CHAIN_ID,
-  TEST_MESSAGE_DOMAIN,
 } from "./shared/setup";
 
 const BPF_LOADER_UPGRADEABLE_PROGRAM_ID = new PublicKey(
@@ -29,7 +28,6 @@ describe("Protocol Initialization", () => {
             TEST_CHAIN_ID,
             2,
             new anchor.BN(0),
-            [...TEST_MESSAGE_DOMAIN],
             deployer.publicKey
           )
           .accounts({
@@ -54,7 +52,6 @@ describe("Protocol Initialization", () => {
             TEST_CHAIN_ID,
             31,
             new anchor.BN(0),
-            [...TEST_MESSAGE_DOMAIN],
             deployer.publicKey
           )
           .accounts({
@@ -79,7 +76,6 @@ describe("Protocol Initialization", () => {
             TEST_CHAIN_ID,
             30,
             new anchor.BN(0),
-            [...TEST_MESSAGE_DOMAIN],
             deployer.publicKey
           )
           .accounts({
@@ -104,7 +100,6 @@ describe("Protocol Initialization", () => {
             TEST_CHAIN_ID,
             30,
             new anchor.BN(500_000),
-            [...TEST_MESSAGE_DOMAIN],
             deployer.publicKey
           )
           .accounts({
@@ -130,7 +125,6 @@ describe("Protocol Initialization", () => {
         TEST_CHAIN_ID,
         feeBps,
         new anchor.BN(registrationFeeLamports),
-        [...TEST_MESSAGE_DOMAIN],
         deployer.publicKey
       )
       .accounts({

@@ -9,17 +9,17 @@ pub mod instructions;
 pub mod state;
 
 use instructions::cancel_withdrawal::*;
-use instructions::close_participant::*;
 use instructions::create_channel::*;
 use instructions::deposit::*;
 use instructions::deposit_for::*;
-use instructions::execute_close_channel::*;
-use instructions::execute_close_channel_instant::*;
+use instructions::execute_unlock_channel_funds::*;
+use instructions::execute_update_channel_authorized_signer::*;
 use instructions::execute_withdrawal_timelocked::*;
 use instructions::initialize::*;
 use instructions::initialize_participant::*;
 use instructions::lock_channel_funds::*;
-use instructions::request_close_channel::*;
+use instructions::request_unlock_channel_funds::*;
+use instructions::request_update_channel_authorized_signer::*;
 use instructions::request_withdrawal::*;
 use instructions::settle_clearing_round::*;
 use instructions::settle_commitment_bundle::*;
@@ -28,7 +28,7 @@ use instructions::token_registry::*;
 use instructions::update_config::*;
 use instructions::update_inbound_channel_policy::*;
 
-declare_id!("9Kwxe9mqisMPsyFknepXAahSodEymFGgkFwqYJHvp45K");
+declare_id!("DE4vmRRDu1EBj98pD9AuZmdTPFAyDChMmRoPRscze5g");
 
 #[program]
 pub mod agon_protocol {
@@ -41,7 +41,6 @@ pub mod agon_protocol {
         chain_id: u16,
         fee_bps: u16,
         registration_fee_lamports: u64,
-        message_domain: [u8; 16],
         initial_authority: Option<Pubkey>,
     ) -> Result<()> {
         instructions::initialize::handler(
@@ -49,7 +48,6 @@ pub mod agon_protocol {
             chain_id,
             fee_bps,
             registration_fee_lamports,
-            message_domain,
             initial_authority,
         )
     }
@@ -125,11 +123,6 @@ pub mod agon_protocol {
         instructions::execute_withdrawal_timelocked::handler(ctx, token_id)
     }
 
-    /// Close a participant account (requires zero balance).
-    pub fn close_participant(ctx: Context<CloseParticipant>) -> Result<()> {
-        instructions::close_participant::handler(ctx)
-    }
-
     /// Create a token-specific channel from payer to payee. Must be called before any payment commitments are signed or settled.
     /// Payer signs and pays ~0.002 SOL rent. Ensures payees and facilitators never pay for creation.
     pub fn create_channel(
@@ -140,22 +133,38 @@ pub mod agon_protocol {
         instructions::create_channel::handler(ctx, token_id, authorized_signer)
     }
 
-    /// Initiate 7-day channel closure grace period.
-    pub fn request_close_channel(ctx: Context<RequestCloseChannel>, token_id: u16) -> Result<()> {
-        instructions::request_close_channel::handler(ctx, token_id)
+    /// Request a timelocked partial unlock of channel collateral.
+    pub fn request_unlock_channel_funds(
+        ctx: Context<RequestUnlockChannelFunds>,
+        token_id: u16,
+        amount: u64,
+    ) -> Result<()> {
+        instructions::request_unlock_channel_funds::handler(ctx, token_id, amount)
     }
 
-    /// Execute channel closure after 7-day grace period (permissionless).
-    pub fn execute_close_channel(ctx: Context<ExecuteCloseChannel>, token_id: u16) -> Result<()> {
-        instructions::execute_close_channel::handler(ctx, token_id)
-    }
-
-    /// Instant channel closure with mutual consent (both parties sign).
-    pub fn execute_close_channel_instant(
-        ctx: Context<ExecuteCloseChannelInstant>,
+    /// Execute a previously requested collateral unlock once its timelock expires.
+    pub fn execute_unlock_channel_funds(
+        ctx: Context<ExecuteUnlockChannelFunds>,
         token_id: u16,
     ) -> Result<()> {
-        instructions::execute_close_channel_instant::handler(ctx, token_id)
+        instructions::execute_unlock_channel_funds::handler(ctx, token_id)
+    }
+
+    /// Request a timelocked rotation of the channel's authorized signer.
+    pub fn request_update_channel_authorized_signer(
+        ctx: Context<RequestUpdateChannelAuthorizedSigner>,
+        token_id: u16,
+        new_signer: Pubkey,
+    ) -> Result<()> {
+        instructions::request_update_channel_authorized_signer::handler(ctx, token_id, new_signer)
+    }
+
+    /// Execute a previously requested authorized-signer rotation once its timelock expires.
+    pub fn execute_update_channel_authorized_signer(
+        ctx: Context<ExecuteUpdateChannelAuthorizedSigner>,
+        token_id: u16,
+    ) -> Result<()> {
+        instructions::execute_update_channel_authorized_signer::handler(ctx, token_id)
     }
 
     /// Lock tokens as ring-fenced collateral for a specific payee channel.

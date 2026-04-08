@@ -5,6 +5,7 @@ import {
   createClearingRoundMessage,
   createMultiSigEd25519Instruction,
   ensureChannel,
+  expectProgramError,
   findParticipantPda,
   getTokenBalance,
   program,
@@ -58,7 +59,6 @@ describe("Clearing Rounds", () => {
           entries: [
             {
               payeeRef: 1,
-              laneGeneration: channelBefore.laneGeneration,
               targetCumulative: channelBefore.settledCumulative.add(
                 new anchor.BN(lockAmount)
               ),
@@ -131,14 +131,12 @@ describe("Clearing Rounds", () => {
           entries: [
             {
               payeeRef: 1,
-              laneGeneration: first.channel.laneGeneration,
               targetCumulative: first.channel.settledCumulative.add(
                 new anchor.BN(1_000_000)
               ),
             },
             {
               payeeRef: 2,
-              laneGeneration: second.channel.laneGeneration,
               targetCumulative: second.channel.settledCumulative.add(
                 new anchor.BN(500_000)
               ),
@@ -238,7 +236,6 @@ describe("Clearing Rounds", () => {
           entries: [
             {
               payeeRef: 1,
-              laneGeneration: aToB.channel.laneGeneration,
               targetCumulative: aToB.channel.settledCumulative.add(
                 new anchor.BN(50_000_000)
               ),
@@ -250,7 +247,6 @@ describe("Clearing Rounds", () => {
           entries: [
             {
               payeeRef: 2,
-              laneGeneration: bToC.channel.laneGeneration,
               targetCumulative: bToC.channel.settledCumulative.add(
                 new anchor.BN(10_000_000)
               ),
@@ -262,7 +258,6 @@ describe("Clearing Rounds", () => {
           entries: [
             {
               payeeRef: 0,
-              laneGeneration: cToA.channel.laneGeneration,
               targetCumulative: cToA.channel.settledCumulative.add(
                 new anchor.BN(10_000_000)
               ),
@@ -316,5 +311,61 @@ describe("Clearing Rounds", () => {
       getTokenBalance(p3After, 1).availableBalance.toNumber() -
         getTokenBalance(p3Before, 1).availableBalance.toNumber()
     ).to.equal(0);
+  });
+
+  it("rejects clearing rounds when the signature count exceeds the participant count", async () => {
+    const { channelPda, payerParticipantPda, payeeParticipantPda, channel } =
+      await ensureChannel(user1, user2.publicKey, 1);
+
+    const payer = await program.account.participantAccount.fetch(
+      payerParticipantPda
+    );
+    const payee = await program.account.participantAccount.fetch(
+      payeeParticipantPda
+    );
+
+    const message = createClearingRoundMessage({
+      tokenId: 1,
+      blocks: [
+        {
+          participantId: payer.participantId,
+          entries: [
+            {
+              payeeRef: 1,
+              targetCumulative: channel.settledCumulative.add(
+                new anchor.BN(250_000)
+              ),
+            },
+          ],
+        },
+        {
+          participantId: payee.participantId,
+          entries: [],
+        },
+      ],
+    });
+
+    const ed25519Ix = createMultiSigEd25519Instruction(
+      [user1, user2, user3],
+      message
+    );
+
+    await expectProgramError(
+      () =>
+        program.methods
+          .settleClearingRound()
+          .accounts({
+            submitter: user1.publicKey,
+          } as any)
+          .remainingAccounts([
+            { pubkey: payerParticipantPda, isSigner: false, isWritable: true },
+            { pubkey: payeeParticipantPda, isSigner: false, isWritable: true },
+            { pubkey: channelPda, isSigner: false, isWritable: true },
+          ])
+          .preInstructions([ed25519Ix])
+          .signers([user1])
+          .rpc(),
+      "InvalidSignature"
+    );
   });
 });

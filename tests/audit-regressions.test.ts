@@ -1,5 +1,5 @@
 import * as anchor from "@coral-xyz/anchor";
-import { Ed25519Program, SystemProgram } from "@solana/web3.js";
+import { Ed25519Program, PublicKey, SystemProgram } from "@solana/web3.js";
 import { TOKEN_PROGRAM_ID, createMint, getAccount } from "@solana/spl-token";
 import { expect } from "chai";
 import {
@@ -24,7 +24,6 @@ import {
   getFeeRecipientTokenAccount,
   parseProgramEvents,
   findChannelPda,
-  findLaneStatePda,
   createCrossInstructionMessageEd25519Instruction,
   createMultiMessageEd25519Instruction,
   createMultiSigEd25519Instruction,
@@ -70,7 +69,6 @@ describe("Audit Regressions", () => {
     const message = createCommitmentMessage({
       payerId: token2Channel.channel.payerId,
       payeeId: token2Channel.channel.payeeId,
-      laneGeneration: token2Channel.channel.laneGeneration,
       amount: nextCommitmentAmount(token2Channel.channel, 1_000_000),
       tokenId: SECOND_TOKEN_ID,
     });
@@ -159,7 +157,6 @@ describe("Audit Regressions", () => {
     const message = createCommitmentMessage({
       payerId: channel.payerId,
       payeeId: channel.payeeId,
-      laneGeneration: channel.laneGeneration,
       amount: nextCommitmentAmount(channel, amount),
       tokenId: 1,
       feeAmount: new anchor.BN(feeAmount),
@@ -234,7 +231,6 @@ describe("Audit Regressions", () => {
     const message = createCommitmentMessage({
       payerId: channel.payerId,
       payeeId: channel.payeeId,
-      laneGeneration: channel.laneGeneration,
       amount: nextCommitmentAmount(channel, amount),
       tokenId: 1,
       feeAmount: new anchor.BN(feeAmount),
@@ -330,7 +326,6 @@ describe("Audit Regressions", () => {
         message: createCommitmentMessage({
           payerId: channelA.channel.payerId,
           payeeId: channelA.channel.payeeId,
-          laneGeneration: channelA.channel.laneGeneration,
           amount: nextCommitmentAmount(channelA.channel, 1_000_000),
           tokenId: 1,
           feeAmount: new anchor.BN(300_000),
@@ -342,7 +337,6 @@ describe("Audit Regressions", () => {
         message: createCommitmentMessage({
           payerId: channelB.channel.payerId,
           payeeId: channelB.channel.payeeId,
-          laneGeneration: channelB.channel.laneGeneration,
           amount: nextCommitmentAmount(channelB.channel, 1_500_000),
           tokenId: 1,
         }),
@@ -584,7 +578,7 @@ describe("Audit Regressions", () => {
     );
   });
 
-  it("rejects closing a channel with a mismatched token id", async () => {
+  it("rejects unlocking channel funds with a mismatched token id", async () => {
     const secondToken = await registerTestToken(SECOND_TOKEN_ID, "USDT");
     const payer = await createTestParticipant();
     const payee = await createTestParticipant();
@@ -623,12 +617,16 @@ describe("Audit Regressions", () => {
       .rpc();
 
     await program.methods
-      .requestCloseChannel(SECOND_TOKEN_ID)
+      .requestUnlockChannelFunds(SECOND_TOKEN_ID, new anchor.BN(200_000))
       .accounts({
+        globalConfig: PublicKey.findProgramAddressSync(
+          [Buffer.from("global-config")],
+          program.programId
+        )[0],
         payerAccount: channel.payerParticipantPda,
         payeeAccount: channel.payeeParticipantPda,
         channelState: channel.channelPda,
-        requester: payer.wallet.publicKey,
+        owner: payer.wallet.publicKey,
       } as any)
       .signers([payer.wallet])
       .rpc();
@@ -638,25 +636,35 @@ describe("Audit Regressions", () => {
     await expectProgramError(
       () =>
         program.methods
-          .executeCloseChannel(1)
+          .executeUnlockChannelFunds(1)
           .accounts({
+            globalConfig: PublicKey.findProgramAddressSync(
+              [Buffer.from("global-config")],
+              program.programId
+            )[0],
             payerAccount: channel.payerParticipantPda,
             payeeAccount: channel.payeeParticipantPda,
             channelState: channel.channelPda,
-            rentRecipient: payer.wallet.publicKey,
+            owner: payer.wallet.publicKey,
           } as any)
+          .signers([payer.wallet])
           .rpc(),
       "InvalidTokenMint"
     );
 
     await program.methods
-      .executeCloseChannel(SECOND_TOKEN_ID)
+      .executeUnlockChannelFunds(SECOND_TOKEN_ID)
       .accounts({
+        globalConfig: PublicKey.findProgramAddressSync(
+          [Buffer.from("global-config")],
+          program.programId
+        )[0],
         payerAccount: channel.payerParticipantPda,
         payeeAccount: channel.payeeParticipantPda,
         channelState: channel.channelPda,
-        rentRecipient: payer.wallet.publicKey,
+        owner: payer.wallet.publicKey,
       } as any)
+      .signers([payer.wallet])
       .rpc();
   });
 
@@ -722,7 +730,6 @@ describe("Audit Regressions", () => {
             entries: [
               {
                 payeeRef: 1,
-                laneGeneration: currentAB.laneGeneration,
                 targetCumulative: new anchor.BN(
                   currentAB.settledCumulative.toString()
                 ).add(new anchor.BN(grossAmount)),
@@ -734,7 +741,6 @@ describe("Audit Regressions", () => {
             entries: [
               {
                 payeeRef: 0,
-                laneGeneration: currentBA.laneGeneration,
                 targetCumulative: new anchor.BN(
                   currentBA.settledCumulative.toString()
                 ).add(new anchor.BN(grossAmount)),
@@ -855,7 +861,6 @@ describe("Audit Regressions", () => {
           entries: [
             {
               payeeRef: 1,
-              laneGeneration: currentAB.laneGeneration,
               targetCumulative: new anchor.BN(
                 currentAB.settledCumulative.toString()
               ).add(new anchor.BN(750_000)),
@@ -900,7 +905,6 @@ describe("Audit Regressions", () => {
           entries: [
             {
               payeeRef: 1,
-              laneGeneration: channel.channel.laneGeneration,
               targetCumulative: new anchor.BN(
                 channel.channel.settledCumulative.toString()
               ).add(new anchor.BN(250_000)),
@@ -1077,11 +1081,6 @@ describe("Audit Regressions", () => {
         owner: payer.wallet.publicKey,
         payerAccount: payer.participantPda,
         payeeAccount: payee.participantPda,
-        laneState: findLaneStatePda(
-          payer.participant.participantId,
-          payee.participant.participantId,
-          CHANNEL_EVENT_TOKEN_ID
-        ),
         payeeOwner: payee.wallet.publicKey,
         channelState: channelPda,
         systemProgram: SystemProgram.programId,

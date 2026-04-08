@@ -93,7 +93,6 @@ describe("Settle Individual", () => {
     const msg = createCommitmentMessage({
       payerId: channel.payerId,
       payeeId: channel.payeeId,
-      laneGeneration: channel.laneGeneration,
       amount: nextCommitmentAmount(channel, 2_000_000),
       tokenId: 1,
     });
@@ -163,7 +162,6 @@ describe("Settle Individual", () => {
     const message = createCommitmentMessage({
       payerId: channel.payerId,
       payeeId: channel.payeeId,
-      laneGeneration: channel.laneGeneration,
       amount: nextCommitmentAmount(channel, 1_500_000),
       tokenId: SECOND_SETTLEMENT_TOKEN_ID,
     });
@@ -216,7 +214,6 @@ describe("Settle Individual", () => {
     const firstMessage = createCommitmentMessage({
       payerId: channel.payerId,
       payeeId: channel.payeeId,
-      laneGeneration: channel.laneGeneration,
       committedAmount: nextCommitmentAmount(channel, 1_000_000),
       tokenId: 1,
     });
@@ -252,7 +249,6 @@ describe("Settle Individual", () => {
     const secondMessage = createCommitmentMessage({
       payerId: channelAfterFirst.payerId,
       payeeId: channelAfterFirst.payeeId,
-      laneGeneration: channelAfterFirst.laneGeneration,
       committedAmount: secondTarget,
       tokenId: 1,
     });
@@ -331,7 +327,6 @@ describe("Settle Individual", () => {
       message: createCommitmentMessage({
         payerId: channel.payerId,
         payeeId: channel.payeeId,
-        laneGeneration: channel.laneGeneration,
         committedAmount: nextCommitmentAmount(channel, deltas[index]),
         tokenId: 1,
       }),
@@ -383,6 +378,72 @@ describe("Settle Individual", () => {
     });
   });
 
+  it("rejects bundle settlement when count does not match the signature count", async () => {
+    const payee = await createTestParticipant();
+    const payer = await createPrimaryFundedParticipant(4_000_000);
+    const extraPayer = await createPrimaryFundedParticipant(4_000_000);
+    const primaryChannel = await ensureChannel(
+      payer.wallet,
+      payee.wallet.publicKey,
+      1
+    );
+    const extraChannel = await ensureChannel(
+      extraPayer.wallet,
+      payee.wallet.publicKey,
+      1
+    );
+
+    const bundleEntries = [
+      {
+        signer: payer.wallet,
+        message: createCommitmentMessage({
+          payerId: primaryChannel.channel.payerId,
+          payeeId: primaryChannel.channel.payeeId,
+          committedAmount: nextCommitmentAmount(primaryChannel.channel, 500_000),
+          tokenId: 1,
+        }),
+      },
+      {
+        signer: extraPayer.wallet,
+        message: createCommitmentMessage({
+          payerId: extraChannel.channel.payerId,
+          payeeId: extraChannel.channel.payeeId,
+          committedAmount: nextCommitmentAmount(extraChannel.channel, 750_000),
+          tokenId: 1,
+        }),
+      },
+    ];
+
+    const bundledEd25519Ix =
+      createMultiMessageEd25519Instruction(bundleEntries);
+
+    await expectProgramError(
+      () =>
+        program.methods
+          .settleCommitmentBundle(1)
+          .accounts({
+            payeeAccount: payee.participantPda,
+            submitter: payee.wallet.publicKey,
+          } as any)
+          .remainingAccounts([
+            {
+              pubkey: primaryChannel.payerParticipantPda,
+              isSigner: false,
+              isWritable: true,
+            },
+            {
+              pubkey: primaryChannel.channelPda,
+              isSigner: false,
+              isWritable: true,
+            },
+          ])
+          .preInstructions([bundledEd25519Ix])
+          .signers([payee.wallet])
+          .rpc(),
+      "InvalidCommitmentMessage"
+    );
+  });
+
   it("should settle individual commitment with fee (fresh payer->fresh payee, fee to user1)", async () => {
     const payer = await createPrimaryFundedParticipant(5_000_000);
     const payee = await createTestParticipant();
@@ -396,7 +457,6 @@ describe("Settle Individual", () => {
     const message = createCommitmentMessage({
       payerId: channel.payerId,
       payeeId: channel.payeeId,
-      laneGeneration: channel.laneGeneration,
       committedAmount: nextCommitmentAmount(channel, paymentAmount),
       tokenId: 1,
       feeAmount: new anchor.BN(feeAmount),
@@ -463,7 +523,6 @@ describe("Settle Individual", () => {
     const message = createCommitmentMessage({
       payerId: channel.payerId,
       payeeId: channel.payeeId,
-      laneGeneration: channel.laneGeneration,
       committedAmount: nextCommitmentAmount(channel, 1_500_000),
       tokenId: 1,
       authorizedSettler: user1.publicKey,
@@ -517,7 +576,6 @@ describe("Settle Individual", () => {
     const message = createCommitmentMessage({
       payerId: channel.payerId,
       payeeId: channel.payeeId,
-      laneGeneration: channel.laneGeneration,
       committedAmount: nextCommitmentAmount(channel, paymentAmount),
       tokenId: 1,
       authorizedSettler: user1.publicKey,
@@ -584,7 +642,6 @@ describe("Settle Individual", () => {
     const commitmentMessage = createCommitmentMessage({
       payerId: channel.payerId,
       payeeId: channel.payeeId,
-      laneGeneration: channel.laneGeneration,
       committedAmount: targetAmount,
       tokenId: 1,
     });
@@ -614,7 +671,6 @@ describe("Settle Individual", () => {
           entries: [
             {
               payeeRef: 1,
-              laneGeneration: channel.laneGeneration,
               targetCumulative: targetAmount,
             },
           ],
@@ -665,7 +721,6 @@ describe("Settle Individual", () => {
           entries: [
             {
               payeeRef: 1,
-              laneGeneration: channel.laneGeneration,
               targetCumulative: targetAmount,
             },
           ],
@@ -699,7 +754,6 @@ describe("Settle Individual", () => {
     const commitmentMessage = createCommitmentMessage({
       payerId: channel.payerId,
       payeeId: channel.payeeId,
-      laneGeneration: channel.laneGeneration,
       committedAmount: targetAmount,
       tokenId: 1,
     });

@@ -175,7 +175,6 @@ describe("Multilateral capacity", () => {
             payeeRef: participantsBefore.findIndex(
               (participant) => participant.participantId === channel.channel.payeeId
             ),
-            laneGeneration: channel.channel.laneGeneration,
             targetCumulative: channel.channel.settledCumulative.add(increment),
           })),
       }));
@@ -198,8 +197,7 @@ describe("Multilateral capacity", () => {
               (candidate) =>
                 candidate.payerParticipant.participantId === block.participantId &&
                 candidate.channel.payeeId ===
-                  participantsBefore[entry.payeeRef].participantId &&
-                candidate.channel.laneGeneration === entry.laneGeneration
+                  participantsBefore[entry.payeeRef].participantId
             );
             if (!channel) {
               throw new Error("Unable to resolve clearing-round channel");

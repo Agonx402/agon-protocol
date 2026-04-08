@@ -6,7 +6,7 @@ use crate::events::ClearingRoundSettled;
 use crate::state::{ChannelState, GlobalConfig, ParticipantAccount, TokenRegistry};
 
 pub const CLEARING_ROUND_MESSAGE_KIND: u8 = 0x02;
-pub const CLEARING_ROUND_MESSAGE_VERSION: u8 = 0x03;
+pub const CLEARING_ROUND_MESSAGE_VERSION: u8 = 0x04;
 pub const CLEARING_ROUND_FIXED_HEADER_SIZE: usize = 21;
 
 struct ParticipantBlockMeta {
@@ -17,7 +17,6 @@ struct ParticipantBlockMeta {
 
 struct ChannelEntry {
     payee_ref: u8,
-    lane_generation: u32,
     target_cumulative: u64,
 }
 
@@ -99,13 +98,10 @@ fn parse_channel_entry(msg: &[u8], offset: &mut usize) -> Result<ChannelEntry> {
     require!(*offset < msg.len(), VaultError::InvalidClearingRoundMessage);
     let payee_ref = msg[*offset];
     *offset += 1;
-    let lane_generation = read_varint_u32(msg, offset)?;
-    require!(lane_generation > 0, VaultError::InvalidLaneGeneration);
     let target_cumulative = read_varint_u64(msg, offset)?;
 
     Ok(ChannelEntry {
         payee_ref,
-        lane_generation,
         target_cumulative,
     })
 }
@@ -272,6 +268,14 @@ pub fn handler<'info>(
             let channel_data = channel_info.try_borrow_data()?;
             let channel = ChannelState::try_deserialize(&mut channel_data.as_ref())?;
             drop(channel_data);
+            ChannelState::verify_expected_pda(
+                channel_info.key,
+                channel.payer_id,
+                channel.payee_id,
+                channel.token_id,
+                channel.bump,
+                program_id,
+            )?;
 
             require!(
                 channel.payer_id == block.participant_id,
@@ -284,10 +288,6 @@ pub fn handler<'info>(
             require!(
                 (entry.payee_ref as usize) < block_participant_ids.len(),
                 VaultError::InvalidClearingRoundMessage
-            );
-            require!(
-                channel.lane_generation == entry.lane_generation,
-                VaultError::InvalidLaneGeneration
             );
             require!(
                 channel.payee_id == block_participant_ids[entry.payee_ref as usize],

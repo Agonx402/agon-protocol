@@ -40,6 +40,10 @@ pub fn handler<'info>(
     require!(count > 0, VaultError::InvalidCommitmentMessage);
 
     let ix_data = ed25519::verify_ed25519_ix(&ctx.accounts.instructions_sysvar, 0)?;
+    require!(
+        ix_data.first().copied() == Some(count),
+        VaultError::InvalidCommitmentMessage
+    );
     let remaining = &ctx.remaining_accounts;
     let payee = &mut ctx.accounts.payee_account;
     let submitter = ctx.accounts.submitter.key();
@@ -122,6 +126,14 @@ pub fn handler<'info>(
         let channel_data = channel_info.try_borrow_data()?;
         let channel = ChannelState::try_deserialize(&mut channel_data.as_ref())?;
         drop(channel_data);
+        ChannelState::verify_expected_pda(
+            channel_info.key,
+            channel.payer_id,
+            channel.payee_id,
+            channel.token_id,
+            channel.bump,
+            program_id,
+        )?;
 
         require!(
             signer_pubkey == channel.authorized_signer,
@@ -132,10 +144,6 @@ pub fn handler<'info>(
             VaultError::InvalidCommitmentMessage
         );
         seen_channel_accounts.push(*channel_info.key);
-        require!(
-            channel.lane_generation == parsed.lane_generation,
-            VaultError::InvalidLaneGeneration
-        );
         require!(
             channel.payer_id == parsed.payer_id,
             VaultError::AccountIdMismatch

@@ -6,13 +6,13 @@ resolution = true
 skip-lint = false
 
 [programs.devnet]
-agon_protocol = "9Kwxe9mqisMPsyFknepXAahSodEymFGgkFwqYJHvp45K"
+agon_protocol = "DE4vmRRDu1EBj98pD9AuZmdTPFAyDChMmRoPRscze5g"
 
 [programs.localnet]
-agon_protocol = "9Kwxe9mqisMPsyFknepXAahSodEymFGgkFwqYJHvp45K"
+agon_protocol = "DE4vmRRDu1EBj98pD9AuZmdTPFAyDChMmRoPRscze5g"
 
 [programs.mainnet]
-agon_protocol = "9Kwxe9mqisMPsyFknepXAahSodEymFGgkFwqYJHvp45K"
+agon_protocol = "DE4vmRRDu1EBj98pD9AuZmdTPFAyDChMmRoPRscze5g"
 
 [registry]
 url = "https://api.apr.dev"

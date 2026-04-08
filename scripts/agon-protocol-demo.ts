@@ -42,7 +42,7 @@ import {
 const TOKEN_REGISTRY_SEED = "token-registry";
 const GLOBAL_CONFIG_SEED = "global-config";
 const PARTICIPANT_SEED = "participant";
-const CHANNEL_SEED = "channel-v1";
+const CHANNEL_SEED = "channel-v2";
 const VAULT_TOKEN_ACCOUNT_SEED = "vault-token-account";
 const USED_SIGNATURE_SEED = "used-sig";
 const MULTILATERAL_NAMESPACE = "mnet";
@@ -89,7 +89,7 @@ const PKCS8_ED25519_PREFIX = Buffer.from(
   "hex"
 );
 
-type SupportedNetwork = "devnet" | "mainnet" | "localnet";
+type SupportedNetwork = "devnet" | "mainnet" | "testnet" | "localnet";
 
 type CliOptions = {
   configFilePath: string | null;
@@ -139,7 +139,6 @@ type TokenBalanceView = {
 
 type ChannelEntrySpec = {
   payeeRef: number;
-  laneGeneration: number;
   targetCumulative: number;
 };
 
@@ -147,7 +146,6 @@ type ParticipantBlockSpec = {
   participantId: number;
   entries: {
     payeeRef: number;
-    laneGeneration: number;
     targetCumulative: number;
   }[];
 };
@@ -155,7 +153,6 @@ type ParticipantBlockSpec = {
 type SignedCommitmentPreviewInput = {
   payer: DemoWallet;
   payee: DemoWallet;
-  laneGeneration: number;
   committedAmount: number;
   tokenId: number;
 };
@@ -172,7 +169,6 @@ type DirectCommitmentPayloadPreview = {
     payerId: number;
     payeeId: number;
     tokenId: number;
-    laneGeneration: number;
     committedAmount: string;
   };
   signature: string;
@@ -195,7 +191,6 @@ type CommitmentBundlePayloadPreview = {
   entries: {
     signedBy: string;
     payerId: number;
-    laneGeneration: number;
     committedAmount: string;
     signature: string;
   }[];
@@ -205,7 +200,6 @@ type ClearingRoundPreviewBlockInput = {
   participant: DemoWallet;
   entries: {
     payeeRef: number;
-    laneGeneration: number;
     payee: DemoWallet;
     targetCumulative: number;
   }[];
@@ -227,7 +221,6 @@ type ClearingRoundPayloadPreview = {
     entries: {
       channel: string;
       payeeRef: number;
-      laneGeneration: number;
       targetCumulative: string;
     }[];
   }[];
@@ -640,6 +633,10 @@ function parseArgs(argv: string[]): CliOptions {
 function inferNetwork(rpcEndpoint: string): SupportedNetwork {
   if (rpcEndpoint.includes("mainnet")) return "mainnet";
   if (rpcEndpoint.includes("devnet")) return "devnet";
+  if (rpcEndpoint.includes("testnet")) return "testnet";
+  if (rpcEndpoint.includes("127.0.0.1") || rpcEndpoint.includes("localhost")) {
+    return "localnet";
+  }
   return "localnet";
 }
 
@@ -673,23 +670,6 @@ function findChannelPda(
   return PublicKey.findProgramAddressSync(
     [
       Buffer.from(CHANNEL_SEED),
-      new anchor.BN(payerId).toArrayLike(Buffer, "le", 4),
-      new anchor.BN(payeeId).toArrayLike(Buffer, "le", 4),
-      new anchor.BN(tokenId).toArrayLike(Buffer, "le", 2),
-    ],
-    programId
-  )[0];
-}
-
-function findLaneStatePda(
-  programId: PublicKey,
-  payerId: number,
-  payeeId: number,
-  tokenId: number
-): PublicKey {
-  return PublicKey.findProgramAddressSync(
-    [
-      Buffer.from("lane-state"),
       new anchor.BN(payerId).toArrayLike(Buffer, "le", 4),
       new anchor.BN(payeeId).toArrayLike(Buffer, "le", 4),
       new anchor.BN(tokenId).toArrayLike(Buffer, "le", 2),
@@ -889,7 +869,6 @@ function createMultiMessageEd25519Instruction(
 function createCommitmentMessage(params: {
   payerId: number;
   payeeId: number;
-  laneGeneration: number;
   committedAmount?: number;
   amount?: number;
   tokenId: number;
@@ -902,13 +881,12 @@ function createCommitmentMessage(params: {
     );
   }
   return Buffer.concat([
-    Buffer.from([0x01, 0x03]),
+    Buffer.from([0x01, 0x04]),
     Buffer.from(params.messageDomain),
     Buffer.from([0x00]),
     Buffer.from(encodeCompactU64(BigInt(params.payerId))),
     Buffer.from(encodeCompactU64(BigInt(params.payeeId))),
     new anchor.BN(params.tokenId).toArrayLike(Buffer, "le", 2),
-    Buffer.from(encodeCompactU64(BigInt(params.laneGeneration))),
     Buffer.from(encodeCompactU64(BigInt(committedAmount))),
   ]);
 }
@@ -924,13 +902,12 @@ function createClearingRoundMessage(params: {
     dynamicParts.push(block.entries.length & 0xff);
     for (const entry of block.entries) {
       dynamicParts.push(entry.payeeRef & 0xff);
-      dynamicParts.push(...encodeCompactU64(BigInt(entry.laneGeneration)));
       dynamicParts.push(...encodeCompactU64(BigInt(entry.targetCumulative)));
     }
   }
 
   return Buffer.concat([
-    Buffer.from([0x02, 0x03]),
+    Buffer.from([0x02, 0x04]),
     Buffer.from(params.messageDomain),
     new anchor.BN(params.tokenId).toArrayLike(Buffer, "le", 2),
     Buffer.from([params.blocks.length & 0xff]),
@@ -1005,7 +982,6 @@ function buildSignedCommitmentPreview(params: {
     const message = createCommitmentMessage({
       payerId: input.payer.participantId,
       payeeId: input.payee.participantId,
-      laneGeneration: input.laneGeneration,
       committedAmount: input.committedAmount,
       tokenId: input.tokenId,
       messageDomain: params.messageDomain,
@@ -1014,7 +990,7 @@ function buildSignedCommitmentPreview(params: {
       signedBy: input.payer.name,
       payload: {
         kind: 0x01,
-        version: 0x03,
+        version: 0x04,
         messageDomain: trimHex(params.messageDomain.toString("hex")),
         flags: 0,
         payer: input.payer.name,
@@ -1022,7 +998,6 @@ function buildSignedCommitmentPreview(params: {
         payerId: input.payer.participantId,
         payeeId: input.payee.participantId,
         tokenId: input.tokenId,
-        laneGeneration: input.laneGeneration,
         committedAmount: `${formatAmount(
           input.committedAmount,
           params.decimals
@@ -1050,7 +1025,7 @@ function buildCommitmentBundlePayloadPreview(params: {
 }): CommitmentBundlePayloadPreview {
   return {
     kind: 0x01,
-    version: 0x03,
+    version: 0x04,
     messageDomain: trimHex(params.messageDomain.toString("hex")),
     payee: params.payee.name,
     payeeId: params.payee.participantId,
@@ -1061,7 +1036,6 @@ function buildCommitmentBundlePayloadPreview(params: {
       const message = createCommitmentMessage({
         payerId: input.payer.participantId,
         payeeId: input.payee.participantId,
-        laneGeneration: input.laneGeneration,
         committedAmount: input.committedAmount,
         tokenId: input.tokenId,
         messageDomain: params.messageDomain,
@@ -1069,7 +1043,6 @@ function buildCommitmentBundlePayloadPreview(params: {
       return {
         signedBy: input.payer.name,
         payerId: input.payer.participantId,
-        laneGeneration: input.laneGeneration,
         committedAmount: `${formatAmount(
           input.committedAmount,
           params.decimals
@@ -1098,7 +1071,6 @@ function buildClearingRoundPayloadPreview(params: {
       participantId: block.participant.participantId,
       entries: block.entries.map((entry) => ({
         payeeRef: entry.payeeRef,
-        laneGeneration: entry.laneGeneration,
         targetCumulative: entry.targetCumulative,
       })),
     })),
@@ -1106,7 +1078,7 @@ function buildClearingRoundPayloadPreview(params: {
 
   return {
     kind: 0x02,
-    version: 0x03,
+    version: 0x04,
     messageDomain: trimHex(params.messageDomain.toString("hex")),
     tokenId: params.tokenId,
     token: params.tokenSymbol,
@@ -1123,7 +1095,6 @@ function buildClearingRoundPayloadPreview(params: {
       entries: block.entries.map((entry) => ({
         channel: `${block.participant.name}->${entry.payee.name}`,
         payeeRef: entry.payeeRef,
-        laneGeneration: entry.laneGeneration,
         targetCumulative: `${formatAmount(
           entry.targetCumulative,
           params.decimals
@@ -2073,12 +2044,6 @@ async function ensureChannel(
         tokenRegistry: findTokenRegistryPda(program.programId),
         payerAccount: payer.participantPda,
         payeeAccount: payee.participantPda,
-        laneState: findLaneStatePda(
-          program.programId,
-          payer.participantId,
-          payee.participantId,
-          tokenId
-        ),
         payeeOwner: payee.keypair.publicKey,
         channelState: channelPda,
         owner: payer.keypair.publicKey,
@@ -2139,7 +2104,6 @@ async function runSingleCommitmentScenario(
       {
         payer,
         payee,
-        laneGeneration: channelBefore.laneGeneration,
         committedAmount: finalCommittedAmount,
         tokenId,
       },
@@ -2148,7 +2112,6 @@ async function runSingleCommitmentScenario(
   const message = createCommitmentMessage({
     payerId: channelBefore.payerId,
     payeeId: channelBefore.payeeId,
-    laneGeneration: channelBefore.laneGeneration,
     committedAmount: finalCommittedAmount,
     tokenId,
     messageDomain,
@@ -2272,7 +2235,6 @@ async function runBatchCommitmentScenario(
       ({ payer, channel, committedAmount }) => ({
         payer,
         payee,
-        laneGeneration: channel.laneGeneration,
         committedAmount,
         tokenId,
       })
@@ -2298,7 +2260,6 @@ async function runBatchCommitmentScenario(
         message: createCommitmentMessage({
           payerId: channel.payerId,
           payeeId: channel.payeeId,
-          laneGeneration: channel.laneGeneration,
           committedAmount,
           tokenId,
           messageDomain,
@@ -2461,7 +2422,6 @@ async function runUnilateralClearingScenario(
         payee: payeeA,
         committedAmount:
           channelABefore.settledCumulative.toNumber() + rawAmountPerCommitment,
-        laneGeneration: channelABefore.laneGeneration,
         tokenId,
       },
       {
@@ -2470,7 +2430,6 @@ async function runUnilateralClearingScenario(
         committedAmount:
           channelABefore.settledCumulative.toNumber() +
           rawAmountPerCommitment * Math.min(2, payeeACommitmentCount),
-        laneGeneration: channelABefore.laneGeneration,
         tokenId,
       },
       {
@@ -2478,7 +2437,6 @@ async function runUnilateralClearingScenario(
         payee: payeeB,
         committedAmount:
           channelBBefore.settledCumulative.toNumber() + rawAmountPerCommitment,
-        laneGeneration: channelBBefore.laneGeneration,
         tokenId,
       },
       {
@@ -2487,7 +2445,6 @@ async function runUnilateralClearingScenario(
         committedAmount:
           channelBBefore.settledCumulative.toNumber() +
           rawAmountPerCommitment * Math.min(2, payeeBCommitmentCount),
-        laneGeneration: channelBBefore.laneGeneration,
         tokenId,
       },
     ].slice(
@@ -2505,14 +2462,12 @@ async function runUnilateralClearingScenario(
       entries: [
         {
           payeeRef: 1,
-          laneGeneration: channelABefore.laneGeneration,
           payee: payeeA,
           targetCumulative:
             channelABefore.settledCumulative.toNumber() + settleAAmount,
         },
         {
           payeeRef: 2,
-          laneGeneration: channelBBefore.laneGeneration,
           payee: payeeB,
           targetCumulative:
             channelBBefore.settledCumulative.toNumber() + settleBAmount,
@@ -2542,7 +2497,6 @@ async function runUnilateralClearingScenario(
       participantId: block.participant.participantId,
       entries: block.entries.map((entry) => ({
         payeeRef: entry.payeeRef,
-        laneGeneration: entry.laneGeneration,
         targetCumulative: entry.targetCumulative,
       })),
     })),
@@ -2670,7 +2624,6 @@ async function runBilateralClearingScenario(
     {
       payer: participantA,
       payee: participantB,
-      laneGeneration: currentAB.laneGeneration,
       committedAmount:
         currentAB.settledCumulative.toNumber() + rawAmountPerCommitment,
       tokenId,
@@ -2683,7 +2636,6 @@ async function runBilateralClearingScenario(
     bilateralPreviewInputs.push({
       payer: participantA,
       payee: participantB,
-      laneGeneration: currentAB.laneGeneration,
       committedAmount:
         currentAB.settledCumulative.toNumber() + rawAmountPerCommitment * 2,
       tokenId,
@@ -2693,7 +2645,6 @@ async function runBilateralClearingScenario(
     bilateralPreviewInputs.push({
       payer: participantB,
       payee: participantA,
-      laneGeneration: currentBA.laneGeneration,
       committedAmount:
         currentBA.settledCumulative.toNumber() + rawAmountPerCommitment,
       tokenId,
@@ -2706,7 +2657,6 @@ async function runBilateralClearingScenario(
     bilateralPreviewInputs.push({
       payer: participantB,
       payee: participantA,
-      laneGeneration: currentBA.laneGeneration,
       committedAmount:
         currentBA.settledCumulative.toNumber() + rawAmountPerCommitment * 2,
       tokenId,
@@ -2724,7 +2674,6 @@ async function runBilateralClearingScenario(
       entries: [
         {
           payeeRef: 1,
-          laneGeneration: currentAB.laneGeneration,
           payee: participantB,
           targetCumulative: currentAB.settledCumulative.toNumber() + grossAToB,
         },
@@ -2735,7 +2684,6 @@ async function runBilateralClearingScenario(
       entries: [
         {
           payeeRef: 0,
-          laneGeneration: currentBA.laneGeneration,
           payee: participantA,
           targetCumulative: currentBA.settledCumulative.toNumber() + grossBToA,
         },
@@ -2756,7 +2704,6 @@ async function runBilateralClearingScenario(
       participantId: block.participant.participantId,
       entries: block.entries.map((entry) => ({
         payeeRef: entry.payeeRef,
-        laneGeneration: entry.laneGeneration,
         targetCumulative: entry.targetCumulative,
       })),
     })),
@@ -2954,7 +2901,6 @@ async function runMultilateralClearingScenario(
               (candidate) =>
                 candidate.participantId === edge.payee.participantId
             ),
-            laneGeneration: edge.channel.laneGeneration,
             payee: edge.payee,
             targetCumulative:
               edge.channel.settledCumulative.toNumber() + grossAmount,
@@ -2967,7 +2913,6 @@ async function runMultilateralClearingScenario(
         participantId: block.participant.participantId,
         entries: block.entries.map((entry) => ({
           payeeRef: entry.payeeRef,
-          laneGeneration: entry.laneGeneration,
           targetCumulative: entry.targetCumulative,
         })),
       })),
@@ -2988,8 +2933,7 @@ async function runMultilateralClearingScenario(
           (candidate) =>
             candidate.payer.participantId === block.participant.participantId &&
             candidate.payee.participantId ===
-              participants[entry.payeeRef]?.participantId &&
-            candidate.channel.laneGeneration === entry.laneGeneration
+              participants[entry.payeeRef]?.participantId
         );
         if (!edge) {
           throw new Error("Unable to resolve clearing-round channel account");
@@ -3081,7 +3025,6 @@ async function runMultilateralClearingScenario(
       .map(({ payer, payee, channel }) => ({
         payer,
         payee,
-        laneGeneration: channel.laneGeneration,
         committedAmount:
           channel.settledCumulative.toNumber() + rawAmountPerCommitment,
         tokenId,

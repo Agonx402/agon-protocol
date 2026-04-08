@@ -1,7 +1,7 @@
 # Agon Payment Commitments
 
 Status: Current  
-Date: 2026-04-03
+Date: 2026-04-08
 
 ## Summary
 
@@ -10,7 +10,7 @@ Agon uses cumulative payment commitments as the unilateral hot path.
 A commitment is:
 
 - signed by the payer-side channel signer
-- scoped to one unilateral lane
+- scoped to one permanent unilateral lane
 - cumulative rather than per-payment
 - settled by redeeming only the delta above the lane's previously settled amount
 
@@ -27,33 +27,30 @@ For any relationship between two agents, Agon keeps two unilateral lanes per tok
 - `A -> B`
 - `B -> A`
 
-Each lane is identified on-chain by:
+Each lane is permanent for the life of the deployment and is identified on-chain by:
 
 - `payer_id`
 - `payee_id`
 - `token_id`
 
-Each open channel instance also stores:
+Participant identities are permanent per wallet. A wallet can register once, keeps the same `participant_id` for the lifetime of the deployment, and must use a different wallet if it wants a different identity.
+
+Each lane stores:
 
 - `settled_cumulative`
 - `locked_balance`
 - `authorized_signer`
-- `close_requested_at`
-- `lane_generation`
+- optional pending unlock state
+- optional pending signer-rotation state
 
-`lane_generation` is the replay boundary.
-
-When a lane is closed and later reopened:
-
-- the PDA stays the same
-- `LaneState.current_generation` increments
-- the new `ChannelState` copies the new generation
-
-That means old signed commitments cannot be replayed against a reopened lane.
+Across deployments, replay protection comes from the immutable `message_domain`
+that Agon derives in-program from the deployed `program_id` and configured
+`chain_id` during bootstrap. `mainnet`, `devnet`, `testnet`, and `localnet`
+use distinct chain ids.
 
 ## Direct Settlement
 
-The signed unilateral message format is `agon-cmt-v3`.
+The signed unilateral message format is `agon-cmt-v4`.
 
 See `docs/client-message-schemas.md` for the exact byte layout.
 
@@ -61,7 +58,7 @@ When a payee settles a commitment, the program:
 
 1. verifies the Ed25519 signature
 2. verifies the `message_domain`
-3. verifies `payer_id`, `payee_id`, `token_id`, and `lane_generation`
+3. verifies `payer_id`, `payee_id`, and `token_id`
 4. verifies `committed_amount > settled_cumulative`
 5. computes `delta = committed_amount - settled_cumulative`
 6. debits the payer by the delta plus any fee
@@ -104,14 +101,13 @@ So the same cumulative edge model can be used in two ways:
 - **directly** through unilateral or bundle settlement
 - **cooperatively** through facilitator- or participant-proposed clearing rounds
 
-The signed round format is `agon-round-v3`.
+The signed round format is `agon-round-v4`.
 
 It uses:
 
 - a shared `message_domain`
 - a signed participant roster
 - `payee_ref` indexes instead of repeated payee ids
-- `lane_generation` instead of a 32-byte channel instance id
 - compact varints for ids and cumulative amounts
 
 ## Worked Example
@@ -133,7 +129,7 @@ That is the key distinction:
 - lanes still advance individually
 - participant balances move only by the net result
 
-## Locked And Unsecured Flows
+## Locked And Trust-Based Flows
 
 Agon supports both risk modes on the same lane model:
 
@@ -145,6 +141,11 @@ If collateral is present, settlement drains in this order:
 1. `locked_balance`
 2. payer available balance
 3. payer withdrawing balance
+
+Permanent lanes use maintenance flows instead of close/reopen:
+
+- `request_unlock_channel_funds` / `execute_unlock_channel_funds`
+- `request_update_channel_authorized_signer` / `execute_update_channel_authorized_signer`
 
 So:
 

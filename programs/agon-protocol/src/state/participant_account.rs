@@ -49,8 +49,6 @@ pub struct ParticipantAccount {
     pub token_balances: Vec<TokenBalance>, // Variable (up to ~928 bytes for 16 tokens)
     /// PDA bump
     pub bump: u8, //  1
-    /// Number of currently open channels touching this participant.
-    pub open_channel_count: u64, // 8
     /// How this participant handles inbound channels created by other parties.
     pub inbound_channel_policy: u8, // 1
     /// Reserved for future participant-level configuration.
@@ -60,14 +58,14 @@ pub struct ParticipantAccount {
 impl ParticipantAccount {
     pub const OWNER_OFFSET: usize = 8;
     /// Base space without token balances
-    pub const BASE_SPACE: usize = 8 + 32 + 4 + 4 + 1 + 8 + 1 + 7; // = 65
+    pub const BASE_SPACE: usize = 8 + 32 + 4 + 4 + 1 + 1 + 7; // = 57
     /// Space for one token balance entry
     pub const TOKEN_BALANCE_SPACE: usize = 58;
     /// Maximum token balances per participant
     pub const MAX_TOKEN_BALANCES: usize = 16;
     /// Total space allocation (base + max token balances)
     pub const SPACE: usize =
-        Self::BASE_SPACE + (Self::MAX_TOKEN_BALANCES * Self::TOKEN_BALANCE_SPACE); // = 65 + 928 = 993
+        Self::BASE_SPACE + (Self::MAX_TOKEN_BALANCES * Self::TOKEN_BALANCE_SPACE); // = 57 + 928 = 985
     pub const SEED_PREFIX: &'static [u8] = b"participant";
     pub const DEFAULT_INBOUND_CHANNEL_POLICY: u8 = InboundChannelPolicy::ConsentRequired as u8;
 
@@ -83,10 +81,19 @@ impl ParticipantAccount {
 }
 
 impl ParticipantAccount {
+    fn require_valid_discriminator(data: &[u8], error_code: VaultError) -> Result<()> {
+        let discriminator = Self::DISCRIMINATOR;
+        if data.len() < discriminator.len() || !data.starts_with(discriminator) {
+            return Err(error_code.into());
+        }
+        Ok(())
+    }
+
     /// Verify that an AccountInfo is a valid ParticipantAccount PDA.
     /// Use when crediting remaining_accounts (fee_recipient, payees) to prevent state corruption.
     pub fn verify_pda(account_info: &AccountInfo, program_id: &Pubkey) -> Result<()> {
         let data = account_info.try_borrow_data()?;
+        Self::require_valid_discriminator(data.as_ref(), VaultError::ParticipantNotFound)?;
         // Use BASE_SPACE (not SPACE) so accounts with fewer than MAX_TOKEN_BALANCES entries pass.
         require!(
             data.len() >= ParticipantAccount::BASE_SPACE,
@@ -119,6 +126,7 @@ impl ParticipantAccount {
             VaultError::AccountIdMismatch
         );
         let data = account_info.try_borrow_data()?;
+        Self::require_valid_discriminator(data.as_ref(), VaultError::AccountIdMismatch)?;
         require!(
             data.len() >= ParticipantAccount::BASE_SPACE,
             VaultError::AccountIdMismatch
@@ -139,6 +147,7 @@ impl ParticipantAccount {
     }
 
     pub fn read_owner_and_id(data: &[u8]) -> Result<(Pubkey, u32)> {
+        Self::require_valid_discriminator(data, VaultError::ParticipantNotFound)?;
         require!(
             data.len() >= ParticipantAccount::BASE_SPACE,
             VaultError::ParticipantNotFound
@@ -158,6 +167,7 @@ impl ParticipantAccount {
     }
 
     pub fn read_owner_id_and_bump(data: &[u8]) -> Result<(Pubkey, u32, u8)> {
+        Self::require_valid_discriminator(data, VaultError::ParticipantNotFound)?;
         let (owner, participant_id) = Self::read_owner_and_id(data)?;
         let token_balance_count = u32::from_le_bytes(
             data[Self::TOKEN_BALANCES_LEN_OFFSET..Self::TOKEN_BALANCES_LEN_OFFSET + 4]
@@ -194,6 +204,7 @@ impl ParticipantAccount {
     }
 
     pub fn read_token_total_balance_from_data(data: &[u8], token_id: u16) -> Result<u64> {
+        Self::require_valid_discriminator(data, VaultError::ParticipantNotFound)?;
         require!(
             data.len() >= Self::TOKEN_BALANCES_DATA_OFFSET,
             VaultError::ParticipantNotFound
@@ -241,6 +252,7 @@ impl ParticipantAccount {
     }
 
     pub fn read_token_total_balance_or_zero_from_data(data: &[u8], token_id: u16) -> Result<u64> {
+        Self::require_valid_discriminator(data, VaultError::ParticipantNotFound)?;
         require!(
             data.len() >= Self::TOKEN_BALANCES_DATA_OFFSET,
             VaultError::ParticipantNotFound
@@ -390,10 +402,6 @@ impl ParticipantAccount {
             .ok_or(error!(VaultError::MathOverflow))
     }
 
-    pub fn open_channel_count(&self) -> u64 {
-        self.open_channel_count
-    }
-
     pub fn inbound_channel_policy(&self) -> Result<InboundChannelPolicy> {
         InboundChannelPolicy::try_from(self.inbound_channel_policy)
     }
@@ -401,20 +409,119 @@ impl ParticipantAccount {
     pub fn set_inbound_channel_policy(&mut self, policy: InboundChannelPolicy) {
         self.inbound_channel_policy = policy as u8;
     }
+}
 
-    pub fn increment_open_channels(&mut self) -> Result<()> {
-        self.open_channel_count = self
-            .open_channel_count
-            .checked_add(1)
-            .ok_or(error!(VaultError::MathOverflow))?;
-        Ok(())
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_token_balance(token_id: u16, available_balance: u64) -> TokenBalance {
+        TokenBalance {
+            token_id,
+            available_balance,
+            withdrawing_balance: available_balance / 2,
+            withdrawal_unlock_at: 123,
+            withdrawal_destination: Pubkey::new_unique(),
+        }
     }
 
-    pub fn decrement_open_channels(&mut self) -> Result<()> {
-        self.open_channel_count = self
-            .open_channel_count
-            .checked_sub(1)
-            .ok_or(error!(VaultError::MathOverflow))?;
-        Ok(())
+    fn sample_participant(token_balances: Vec<TokenBalance>) -> ParticipantAccount {
+        ParticipantAccount {
+            owner: Pubkey::new_unique(),
+            participant_id: 42,
+            token_balances,
+            bump: 7,
+            inbound_channel_policy: ParticipantAccount::DEFAULT_INBOUND_CHANNEL_POLICY,
+            _reserved: [0u8; 7],
+        }
+    }
+
+    #[test]
+    fn space_covers_max_participant_payload() {
+        let participant = sample_participant(
+            (0..ParticipantAccount::MAX_TOKEN_BALANCES)
+                .map(|i| sample_token_balance(i as u16 + 1, 1_000 + i as u64))
+                .collect(),
+        );
+
+        let mut serialized = Vec::new();
+        participant
+            .try_serialize(&mut serialized)
+            .expect("participant should serialize");
+
+        assert_eq!(ParticipantAccount::BASE_SPACE, 57);
+        assert_eq!(serialized.len(), ParticipantAccount::SPACE - 8);
+    }
+
+    #[test]
+    fn raw_field_readers_match_current_layout() {
+        let participant = sample_participant(vec![
+            sample_token_balance(1, 10),
+            sample_token_balance(2, 20),
+        ]);
+
+        let mut account_data = vec![0u8; 8];
+        participant
+            .try_serialize(&mut account_data)
+            .expect("participant should serialize");
+
+        let (owner, participant_id) =
+            ParticipantAccount::read_owner_and_id(account_data.as_slice()).unwrap();
+        assert_eq!(owner, participant.owner);
+        assert_eq!(participant_id, participant.participant_id);
+
+        let (owner_with_bump, participant_id_with_bump, bump) =
+            ParticipantAccount::read_owner_id_and_bump(account_data.as_slice()).unwrap();
+        assert_eq!(owner_with_bump, participant.owner);
+        assert_eq!(participant_id_with_bump, participant.participant_id);
+        assert_eq!(bump, participant.bump);
+
+        let token_two_total =
+            ParticipantAccount::read_token_total_balance_from_data(account_data.as_slice(), 2)
+                .unwrap();
+        assert_eq!(token_two_total, 30);
+
+        let missing_total = ParticipantAccount::read_token_total_balance_or_zero_from_data(
+            account_data.as_slice(),
+            999,
+        )
+        .unwrap();
+        assert_eq!(missing_total, 0);
+    }
+
+    #[test]
+    fn verify_pda_from_raw_fields_matches_participant_seed_scheme() {
+        let owner = Pubkey::new_unique();
+        let (participant_pda, bump) = Pubkey::find_program_address(
+            &[ParticipantAccount::SEED_PREFIX, owner.as_ref()],
+            &crate::id(),
+        );
+
+        ParticipantAccount::verify_pda_from_raw_fields(
+            &participant_pda,
+            &owner,
+            bump,
+            &crate::id(),
+        )
+        .expect("derived participant PDA should verify");
+    }
+
+    #[test]
+    fn raw_readers_reject_wrong_discriminator() {
+        let participant = sample_participant(vec![sample_token_balance(1, 10)]);
+        let mut account_data = vec![0u8; 8];
+        participant
+            .try_serialize(&mut account_data)
+            .expect("participant should serialize");
+        account_data[0] ^= 0xff;
+
+        assert!(ParticipantAccount::read_owner_and_id(account_data.as_slice()).is_err());
+        assert!(
+            ParticipantAccount::read_token_total_balance_or_zero_from_data(
+                account_data.as_slice(),
+                1
+            )
+            .is_err()
+        );
     }
 }

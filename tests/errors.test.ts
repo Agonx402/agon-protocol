@@ -13,11 +13,10 @@ import {
   user1TokenAccount,
   feeRecipientTokenAccount,
   expectProgramError,
-  createTestParticipant,
   createFundedTokenAccount,
+  createTestParticipant,
   createCommitmentMessage,
   ensureChannel,
-  findLaneStatePda,
   findParticipantPda,
   findTokenRegistryPda,
   findVaultTokenAccountPda,
@@ -216,7 +215,7 @@ describe("Negative tests — expect specific errors", () => {
     );
     const [channelPda] = PublicKey.findProgramAddressSync(
       [
-        Buffer.from("channel-v1"),
+        Buffer.from("channel-v2"),
         new Uint8Array(new Uint32Array([2]).buffer), // payer_id
         new Uint8Array(new Uint32Array([3]).buffer), // payee_id
         new Uint8Array(new Uint16Array([1]).buffer), // token_id = 1 (primary token)
@@ -231,7 +230,6 @@ describe("Negative tests — expect specific errors", () => {
         owner: user3.publicKey,
         payerAccount: payerParticipantPda,
         payeeAccount: payeeParticipantPda,
-        laneState: findLaneStatePda(2, 3, 1),
         payeeOwner: user4.publicKey,
         channelState: channelPda,
         systemProgram: SystemProgram.programId,
@@ -248,7 +246,6 @@ describe("Negative tests — expect specific errors", () => {
             owner: user3.publicKey,
             payerAccount: payerParticipantPda,
             payeeAccount: payeeParticipantPda,
-            laneState: findLaneStatePda(2, 3, 1),
             payeeOwner: user4.publicKey,
             channelState: channelPda,
             systemProgram: SystemProgram.programId,
@@ -256,88 +253,6 @@ describe("Negative tests — expect specific errors", () => {
           .signers([user3, user4])
           .rpc(),
       "Simulation failed"
-    );
-  });
-
-  it("request_close_channel: rejects ChannelAlreadyClosing", async () => {
-    const [payerParticipantPda] = PublicKey.findProgramAddressSync(
-      [Buffer.from("participant"), user3.publicKey.toBytes()],
-      program.programId
-    );
-    const [payeeParticipantPda] = PublicKey.findProgramAddressSync(
-      [Buffer.from("participant"), user4.publicKey.toBytes()],
-      program.programId
-    );
-    const [channelPda] = PublicKey.findProgramAddressSync(
-      [
-        Buffer.from("channel-v1"),
-        new Uint8Array(new Uint32Array([2]).buffer), // payer_id
-        new Uint8Array(new Uint32Array([3]).buffer), // payee_id
-        new Uint8Array(new Uint16Array([1]).buffer), // token_id = 1 (primary token)
-      ],
-      program.programId
-    );
-
-    // Request channel close
-    await program.methods
-      .requestCloseChannel(1)
-      .accounts({
-        channelState: channelPda,
-        requester: user3.publicKey,
-        payerAccount: payerParticipantPda,
-        payeeAccount: payeeParticipantPda,
-      } as any)
-      .signers([user3])
-      .rpc();
-
-    // Try to request close again
-    await expectProgramError(
-      () =>
-        program.methods
-          .requestCloseChannel(1)
-          .accounts({
-            channelState: channelPda,
-            requester: user3.publicKey,
-            payerAccount: payerParticipantPda,
-            payeeAccount: payeeParticipantPda,
-          } as any)
-          .signers([user3])
-          .rpc(),
-      "ChannelAlreadyClosing"
-    );
-  });
-
-  it("close_participant: rejects BalanceMustBeZeroToClose", async () => {
-    const participant = await createTestParticipant();
-    const tokenAccount = await createFundedTokenAccount(
-      participant.wallet,
-      primaryMint,
-      1_000_000
-    );
-
-    await program.methods
-      .deposit(1, new anchor.BN(1000000)) // 1 primary-token unit
-      .accounts({
-        participantAccount: participant.participantPda,
-        owner: participant.wallet.publicKey,
-        ownerTokenAccount: tokenAccount,
-        vaultTokenAccount: findVaultTokenAccountPda(1),
-      } as any)
-      .signers([participant.wallet])
-      .rpc();
-
-    // Try to close participant with non-zero balance
-    await expectProgramError(
-      () =>
-        program.methods
-          .closeParticipant()
-          .accounts({
-            participantAccount: participant.participantPda,
-            owner: participant.wallet.publicKey,
-          } as any)
-          .signers([participant.wallet])
-          .rpc(),
-      "BalanceMustBeZeroToClose"
     );
   });
 
@@ -365,40 +280,125 @@ describe("Negative tests — expect specific errors", () => {
     );
   });
 
-  it("execute_close_channel: rejects ChannelNotClosing", async () => {
+  it("execute_unlock_channel_funds: rejects NoChannelUnlockPending", async () => {
     const payer = await createTestParticipant();
     const payee = await createTestParticipant();
     const { channelPda, payerParticipantPda, payeeParticipantPda } =
       await ensureChannel(payer.wallet, payee.wallet.publicKey, 1);
+    const [globalConfigPda] = PublicKey.findProgramAddressSync(
+      [Buffer.from("global-config")],
+      program.programId
+    );
 
     await expectProgramError(
       () =>
         program.methods
-          .executeCloseChannel(1)
+          .executeUnlockChannelFunds(1)
           .accounts({
+            globalConfig: globalConfigPda,
             payerAccount: payerParticipantPda,
             payeeAccount: payeeParticipantPda,
             channelState: channelPda,
-            rentRecipient: payer.wallet.publicKey,
+            owner: payer.wallet.publicKey,
           } as any)
+          .signers([payer.wallet])
           .rpc(),
-      "ChannelNotClosing"
+      "NoChannelUnlockPending"
     );
   });
 
-  it("execute_close_channel: rejects WithdrawalLocked (before timelock)", async () => {
+  it("request_unlock_channel_funds: rejects AmountMustBePositive and oversized unlocks", async () => {
     const payer = await createTestParticipant();
     const payee = await createTestParticipant();
     const { channelPda, payerParticipantPda, payeeParticipantPda } =
       await ensureChannel(payer.wallet, payee.wallet.publicKey, 1);
+    const [globalConfigPda] = PublicKey.findProgramAddressSync(
+      [Buffer.from("global-config")],
+      program.programId
+    );
 
     await program.methods
-      .requestCloseChannel(1)
+      .requestUnlockChannelFunds(1, new anchor.BN(0))
+      .accounts({
+        globalConfig: globalConfigPda,
+        payerAccount: payerParticipantPda,
+        payeeAccount: payeeParticipantPda,
+        channelState: channelPda,
+        owner: payer.wallet.publicKey,
+      } as any)
+      .signers([payer.wallet])
+      .rpc()
+      .then(
+        () => expect.fail("expected zero-amount unlock request to fail"),
+        (e) => {
+          expect(`${e.message ?? ""} ${e.logs?.join(" ") ?? ""}`).to.include(
+            "AmountMustBePositive"
+          );
+        }
+      );
+
+    await expectProgramError(
+      () =>
+        program.methods
+          .requestUnlockChannelFunds(1, new anchor.BN(1))
+          .accounts({
+            globalConfig: globalConfigPda,
+            payerAccount: payerParticipantPda,
+            payeeAccount: payeeParticipantPda,
+            channelState: channelPda,
+            owner: payer.wallet.publicKey,
+          } as any)
+          .signers([payer.wallet])
+          .rpc(),
+      "InsufficientLockedBalance"
+    );
+  });
+
+  it("execute_unlock_channel_funds: rejects WithdrawalLocked before the timelock", async () => {
+    const payer = await createTestParticipant();
+    const payee = await createTestParticipant();
+    const { channelPda, payerParticipantPda, payeeParticipantPda } =
+      await ensureChannel(payer.wallet, payee.wallet.publicKey, 1);
+    const ownerTokenAccount = await createFundedTokenAccount(
+      payer.wallet,
+      primaryMint,
+      1_000_000
+    );
+    const [globalConfigPda] = PublicKey.findProgramAddressSync(
+      [Buffer.from("global-config")],
+      program.programId
+    );
+
+    await program.methods
+      .deposit(1, new anchor.BN(200_000))
+      .accounts({
+        owner: payer.wallet.publicKey,
+        participantAccount: payerParticipantPda,
+        ownerTokenAccount,
+        vaultTokenAccount: findVaultTokenAccountPda(1),
+      } as any)
+      .signers([payer.wallet])
+      .rpc();
+
+    await program.methods
+      .lockChannelFunds(1, new anchor.BN(100_000))
       .accounts({
         payerAccount: payerParticipantPda,
-        channelState: channelPda,
-        requester: payer.wallet.publicKey,
         payeeAccount: payeeParticipantPda,
+        channelState: channelPda,
+        owner: payer.wallet.publicKey,
+      } as any)
+      .signers([payer.wallet])
+      .rpc();
+
+    await program.methods
+      .requestUnlockChannelFunds(1, new anchor.BN(1))
+      .accounts({
+        globalConfig: globalConfigPda,
+        payerAccount: payerParticipantPda,
+        payeeAccount: payeeParticipantPda,
+        channelState: channelPda,
+        owner: payer.wallet.publicKey,
       } as any)
       .signers([payer.wallet])
       .rpc();
@@ -406,50 +406,88 @@ describe("Negative tests — expect specific errors", () => {
     await expectProgramError(
       () =>
         program.methods
-          .executeCloseChannel(1)
+          .executeUnlockChannelFunds(1)
           .accounts({
+            globalConfig: globalConfigPda,
             payerAccount: payerParticipantPda,
             payeeAccount: payeeParticipantPda,
             channelState: channelPda,
-            rentRecipient: payer.wallet.publicKey,
+            owner: payer.wallet.publicKey,
           } as any)
+          .signers([payer.wallet])
           .rpc(),
       "WithdrawalLocked"
     );
   });
 
-  it("execute_close_channel: rejects InvalidRentRecipient", async () => {
+  it("request_update_channel_authorized_signer: rejects invalid signers", async () => {
     const payer = await createTestParticipant();
     const payee = await createTestParticipant();
-    const { channelPda, payerParticipantPda, payeeParticipantPda } =
-      await ensureChannel(payer.wallet, payee.wallet.publicKey, 1);
-
-    await program.methods
-      .requestCloseChannel(1)
-      .accounts({
-        payerAccount: payerParticipantPda,
-        channelState: channelPda,
-        requester: payer.wallet.publicKey,
-        payeeAccount: payeeParticipantPda,
-      } as any)
-      .signers([payer.wallet])
-      .rpc();
-
-    // Wait for timelock
-    await new Promise((resolve) => setTimeout(resolve, 3500));
+    const ensured = await ensureChannel(payer.wallet, payee.wallet.publicKey, 1);
+    const [globalConfigPda] = PublicKey.findProgramAddressSync(
+      [Buffer.from("global-config")],
+      program.programId
+    );
 
     await expectProgramError(
       () =>
         program.methods
-          .executeCloseChannel(1)
+          .requestUpdateChannelAuthorizedSigner(1, PublicKey.default)
           .accounts({
-            payerAccount: payerParticipantPda,
-            payeeAccount: payeeParticipantPda,
-            channelState: channelPda,
-            rentRecipient: payee.wallet.publicKey,
+            globalConfig: globalConfigPda,
+            payerAccount: ensured.payerParticipantPda,
+            payeeAccount: ensured.payeeParticipantPda,
+            channelState: ensured.channelPda,
+            owner: payer.wallet.publicKey,
           } as any)
+          .signers([payer.wallet])
           .rpc(),
-      "InvalidRentRecipient"
+      "InvalidAuthorizedSigner"
+    );
+
+    await expectProgramError(
+      () =>
+        program.methods
+          .requestUpdateChannelAuthorizedSigner(
+            1,
+            ensured.channel.authorizedSigner
+          )
+          .accounts({
+            globalConfig: globalConfigPda,
+            payerAccount: ensured.payerParticipantPda,
+            payeeAccount: ensured.payeeParticipantPda,
+            channelState: ensured.channelPda,
+            owner: payer.wallet.publicKey,
+          } as any)
+          .signers([payer.wallet])
+          .rpc(),
+      "InvalidAuthorizedSigner"
+    );
+  });
+
+  it("execute_update_channel_authorized_signer: rejects missing pending updates", async () => {
+    const payer = await createTestParticipant();
+    const payee = await createTestParticipant();
+    const ensured = await ensureChannel(payer.wallet, payee.wallet.publicKey, 1);
+    const [globalConfigPda] = PublicKey.findProgramAddressSync(
+      [Buffer.from("global-config")],
+      program.programId
+    );
+
+    await expectProgramError(
+      () =>
+        program.methods
+          .executeUpdateChannelAuthorizedSigner(1)
+          .accounts({
+            globalConfig: globalConfigPda,
+            payerAccount: ensured.payerParticipantPda,
+            payeeAccount: ensured.payeeParticipantPda,
+            channelState: ensured.channelPda,
+            owner: payer.wallet.publicKey,
+          } as any)
+          .signers([payer.wallet])
+          .rpc(),
+      "NoAuthorizedSignerUpdatePending"
     );
   });
 
@@ -543,7 +581,6 @@ describe("Negative tests — expect specific errors", () => {
     const msg = createCommitmentMessage({
       payerId: channel.payerId,
       payeeId: channel.payeeId,
-      laneGeneration: channel.laneGeneration,
       committedAmount: new anchor.BN(2_000_000),
       tokenId: 1,
       feeAmount: new anchor.BN(10_000),
@@ -579,7 +616,6 @@ describe("Negative tests — expect specific errors", () => {
     const msg = createCommitmentMessage({
       payerId: channel.payerId,
       payeeId: channel.payeeId,
-      laneGeneration: channel.laneGeneration,
       committedAmount: new anchor.BN(2_000_000),
       tokenId: 1,
       messageDomain: Buffer.alloc(16, 9),
@@ -613,7 +649,6 @@ describe("Negative tests — expect specific errors", () => {
     const msg = createCommitmentMessage({
       payerId: channel.payerId,
       payeeId: channel.payeeId,
-      laneGeneration: channel.laneGeneration,
       committedAmount: new anchor.BN(0),
       tokenId: 1,
     });
@@ -646,7 +681,6 @@ describe("Negative tests — expect specific errors", () => {
     const msg = createCommitmentMessage({
       payerId: channel.payerId,
       payeeId: channel.payeeId,
-      laneGeneration: channel.laneGeneration,
       committedAmount: new anchor.BN(100_000_000),
       tokenId: 1,
     });

@@ -2,9 +2,7 @@ use anchor_lang::prelude::*;
 
 use crate::errors::VaultError;
 use crate::events::ChannelCreated;
-use crate::state::{
-    ChannelState, InboundChannelPolicy, LaneState, ParticipantAccount, TokenRegistry,
-};
+use crate::state::{ChannelState, InboundChannelPolicy, ParticipantAccount, TokenRegistry};
 
 /// Create a channel from payer to payee. Must be called before any payment commitments are signed or settled.
 /// Payer signs and pays the ~0.002 SOL rent. Ensures predictable UX: payees and facilitators
@@ -20,47 +18,34 @@ pub fn handler(
         .find_token(token_id)
         .ok_or(VaultError::TokenNotFound)?;
 
-    let is_self_channel = ctx.accounts.payer_account.owner == ctx.accounts.payee_account.owner;
-    if !is_self_channel {
-        if let Some(payee_owner) = ctx.accounts.payee_owner.as_ref() {
+    require!(
+        ctx.accounts.payer_account.participant_id != ctx.accounts.payee_account.participant_id,
+        VaultError::SelfChannelNotAllowed
+    );
+
+    if let Some(payee_owner) = ctx.accounts.payee_owner.as_ref() {
+        require!(
+            payee_owner.key() == ctx.accounts.payee_account.owner,
+            VaultError::InboundChannelConsentRequired
+        );
+    }
+
+    match ctx.accounts.payee_account.inbound_channel_policy()? {
+        InboundChannelPolicy::Permissionless => {}
+        InboundChannelPolicy::ConsentRequired => {
             require!(
-                payee_owner.key() == ctx.accounts.payee_account.owner,
+                ctx.accounts
+                    .payee_owner
+                    .as_ref()
+                    .map(|payee_owner| payee_owner.key() == ctx.accounts.payee_account.owner)
+                    .unwrap_or(false),
                 VaultError::InboundChannelConsentRequired
             );
         }
-
-        match ctx.accounts.payee_account.inbound_channel_policy()? {
-            InboundChannelPolicy::Permissionless => {}
-            InboundChannelPolicy::ConsentRequired => {
-                require!(
-                    ctx.accounts
-                        .payee_owner
-                        .as_ref()
-                        .map(|payee_owner| payee_owner.key() == ctx.accounts.payee_account.owner)
-                        .unwrap_or(false),
-                    VaultError::InboundChannelConsentRequired
-                );
-            }
-            InboundChannelPolicy::Disabled => {
-                return Err(error!(VaultError::InboundChannelsDisabled));
-            }
+        InboundChannelPolicy::Disabled => {
+            return Err(error!(VaultError::InboundChannelsDisabled));
         }
     }
-
-    let payer_key = ctx.accounts.payer_account.key();
-    let payee_key = ctx.accounts.payee_account.key();
-
-    ctx.accounts.payer_account.increment_open_channels()?;
-    if payee_key != payer_key {
-        ctx.accounts.payee_account.increment_open_channels()?;
-    }
-
-    let lane_state = &mut ctx.accounts.lane_state;
-    lane_state.current_generation = lane_state
-        .current_generation
-        .checked_add(1)
-        .ok_or(error!(VaultError::MathOverflow))?;
-    lane_state.bump = ctx.bumps.lane_state;
 
     let channel = &mut ctx.accounts.channel_state;
 
@@ -69,17 +54,18 @@ pub fn handler(
     channel.payer_id = ctx.accounts.payer_account.participant_id;
     channel.payee_id = ctx.accounts.payee_account.participant_id;
     channel.settled_cumulative = 0;
-    channel.close_requested_at = 0;
     channel.locked_balance = 0;
     channel.authorized_signer = authorized_signer.unwrap_or(ctx.accounts.payer_account.owner);
-    channel.lane_generation = lane_state.current_generation;
+    channel.pending_unlock_amount = 0;
+    channel.unlock_requested_at = 0;
+    channel.pending_authorized_signer = Pubkey::default();
+    channel.authorized_signer_update_requested_at = 0;
     channel.bump = ctx.bumps.channel_state;
 
     emit!(ChannelCreated {
         payer_id: channel.payer_id,
         payee_id: channel.payee_id,
         token_id,
-        lane_generation: channel.lane_generation,
     });
 
     Ok(())
@@ -95,7 +81,6 @@ pub struct CreateChannel<'info> {
     pub token_registry: Account<'info, TokenRegistry>,
 
     #[account(
-        mut,
         seeds = [ParticipantAccount::SEED_PREFIX, owner.key().as_ref()],
         bump,
         has_one = owner,
@@ -103,7 +88,6 @@ pub struct CreateChannel<'info> {
     pub payer_account: Account<'info, ParticipantAccount>,
 
     #[account(
-        mut,
         seeds = [ParticipantAccount::SEED_PREFIX, payee_account.owner.as_ref()],
         bump,
     )]
@@ -122,20 +106,6 @@ pub struct CreateChannel<'info> {
         bump,
     )]
     pub channel_state: Account<'info, ChannelState>,
-
-    #[account(
-        init_if_needed,
-        payer = owner,
-        space = LaneState::SPACE,
-        seeds = [
-            LaneState::SEED_PREFIX,
-            payer_account.participant_id.to_le_bytes().as_ref(),
-            payee_account.participant_id.to_le_bytes().as_ref(),
-            &token_id.to_le_bytes(),
-        ],
-        bump,
-    )]
-    pub lane_state: Account<'info, LaneState>,
 
     #[account(mut)]
     pub owner: Signer<'info>,

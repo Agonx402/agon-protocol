@@ -62,8 +62,8 @@ async function createPrimaryFundedParticipant(
   };
 }
 
-describe("Message v3", () => {
-  it("settles an individual v3 commitment", async () => {
+describe("Message v4", () => {
+  it("settles an individual v4 commitment", async () => {
     const payer = await createPrimaryFundedParticipant(5_000_000);
     const payee = await createTestParticipant();
     const { channelPda, payerParticipantPda, payeeParticipantPda, channel } =
@@ -73,7 +73,6 @@ describe("Message v3", () => {
       payerId: channel.payerId,
       payeeId: channel.payeeId,
       tokenId: 1,
-      laneGeneration: channel.laneGeneration,
       committedAmount: nextCommitmentAmount(channel, 1_250_000),
     });
 
@@ -118,7 +117,7 @@ describe("Message v3", () => {
     ).to.equal(1_250_000);
   });
 
-  it("settles a bundle of v3 commitments for one payee", async () => {
+  it("settles a bundle of v4 commitments for one payee", async () => {
     const payee = await createTestParticipant();
     const payers = await Promise.all([
       createPrimaryFundedParticipant(6_000_000),
@@ -142,7 +141,6 @@ describe("Message v3", () => {
         payerId: channelEntry.channel.payerId,
         payeeId: channelEntry.channel.payeeId,
         tokenId: 1,
-        laneGeneration: channelEntry.channel.laneGeneration,
         committedAmount: nextCommitmentAmount(channelEntry.channel, deltas[index]),
       }),
     }));
@@ -184,7 +182,7 @@ describe("Message v3", () => {
     ).to.equal(2_500_000);
   });
 
-  it("settles a v3 multilateral clearing round", async () => {
+  it("settles a v4 multilateral clearing round", async () => {
     const a = await createPrimaryFundedParticipant(5_000_000);
     const b = await createPrimaryFundedParticipant(5_000_000);
     const c = await createPrimaryFundedParticipant(5_000_000);
@@ -198,7 +196,6 @@ describe("Message v3", () => {
         entries: [
           {
             payeeRef: 1,
-            laneGeneration: aToB.channel.laneGeneration,
             targetCumulative: nextCommitmentAmount(aToB.channel, 500_000),
           },
         ],
@@ -208,7 +205,6 @@ describe("Message v3", () => {
         entries: [
           {
             payeeRef: 2,
-            laneGeneration: bToC.channel.laneGeneration,
             targetCumulative: nextCommitmentAmount(bToC.channel, 500_000),
           },
         ],
@@ -218,7 +214,6 @@ describe("Message v3", () => {
         entries: [
           {
             payeeRef: 0,
-            laneGeneration: cToA.channel.laneGeneration,
             targetCumulative: nextCommitmentAmount(cToA.channel, 500_000),
           },
         ],
@@ -286,7 +281,7 @@ describe("Message v3", () => {
     ).to.equal(0);
   });
 
-  it("rejects a stale v3 commitment after a lane is reopened", async () => {
+  it("rejects replaying a stale v4 commitment after the lane has already advanced", async () => {
     const payer = await createPrimaryFundedParticipant(5_000_000);
     const payee = await createTestParticipant();
     const { channelPda, payerParticipantPda, payeeParticipantPda, channel } =
@@ -296,7 +291,6 @@ describe("Message v3", () => {
       payerId: channel.payerId,
       payeeId: channel.payeeId,
       tokenId: 1,
-      laneGeneration: channel.laneGeneration,
       committedAmount: nextCommitmentAmount(channel, 1_000_000),
     });
     const staleSignatureIx = Ed25519Program.createInstructionWithPrivateKey({
@@ -305,34 +299,31 @@ describe("Message v3", () => {
     });
 
     await program.methods
-      .executeCloseChannelInstant(1)
+      .settleIndividual()
       .accounts({
+        channelState: channelPda,
         payerAccount: payerParticipantPda,
         payeeAccount: payeeParticipantPda,
-        channelState: channelPda,
-        owner: payer.wallet.publicKey,
-        payeeSigner: payee.wallet.publicKey,
-        rentRecipient: payer.wallet.publicKey,
+        submitter: payee.wallet.publicKey,
       } as any)
-      .signers([payer.wallet, payee.wallet])
+      .preInstructions([staleSignatureIx])
+      .signers([payee.wallet])
       .rpc();
-
-    const reopened = await ensureChannel(payer.wallet, payee.wallet.publicKey, 1);
 
     await expectProgramError(
       () =>
         program.methods
           .settleIndividual()
           .accounts({
-            channelState: reopened.channelPda,
-            payerAccount: reopened.payerParticipantPda,
-            payeeAccount: reopened.payeeParticipantPda,
+            channelState: channelPda,
+            payerAccount: payerParticipantPda,
+            payeeAccount: payeeParticipantPda,
             submitter: payee.wallet.publicKey,
           } as any)
           .preInstructions([staleSignatureIx])
           .signers([payee.wallet])
           .rpc(),
-      "InvalidLaneGeneration"
+      "CommitmentAmountMustIncrease"
     );
   });
 });

@@ -28,7 +28,6 @@ pub fn handler(ctx: Context<InitializeParticipant>) -> Result<()> {
     participant.participant_id = config.next_participant_id;
     participant.token_balances = Vec::new(); // Start with empty token balances
     participant.bump = ctx.bumps.participant_account;
-    participant.open_channel_count = 0;
     participant.inbound_channel_policy = ParticipantAccount::DEFAULT_INBOUND_CHANNEL_POLICY;
     participant._reserved = [0u8; 7];
 

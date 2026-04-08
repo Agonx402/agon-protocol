@@ -10,17 +10,16 @@ use crate::events::IndividualSettled;
 use crate::state::{ChannelState, GlobalConfig, ParticipantAccount, TokenRegistry};
 
 pub const COMMITMENT_MESSAGE_KIND: u8 = 0x01;
-pub const COMMITMENT_MESSAGE_VERSION: u8 = 0x03;
+pub const COMMITMENT_MESSAGE_VERSION: u8 = 0x04;
 pub const COMMITMENT_FLAG_AUTHORIZED_SETTLER: u8 = 1 << 0;
 pub const COMMITMENT_FLAG_FEE: u8 = 1 << 1;
 pub const COMMITMENT_FIXED_HEADER_SIZE: usize = 19;
-pub const COMMITMENT_MIN_MSG_SIZE: usize = 25;
+pub const COMMITMENT_MIN_MSG_SIZE: usize = 24;
 
 pub struct ParsedCommitmentMessage {
     pub payer_id: u32,
     pub payee_id: u32,
     pub token_id: u16,
-    pub lane_generation: u32,
     pub committed_amount: u64,
     pub authorized_settler: Option<Pubkey>,
     pub fee_amount: u64,
@@ -97,8 +96,6 @@ pub fn parse_commitment_message(
     let token_id = u16::from_le_bytes(msg[offset..offset + 2].try_into().unwrap());
     offset += 2;
 
-    let lane_generation = read_varint_u32(msg, &mut offset)?;
-    require!(lane_generation > 0, VaultError::InvalidLaneGeneration);
     let committed_amount = read_varint_u64(msg, &mut offset)?;
 
     let authorized_settler = if (flags & COMMITMENT_FLAG_AUTHORIZED_SETTLER) != 0 {
@@ -127,7 +124,6 @@ pub fn parse_commitment_message(
         payer_id,
         payee_id,
         token_id,
-        lane_generation,
         committed_amount,
         authorized_settler,
         fee_amount,
@@ -153,6 +149,10 @@ pub fn handler(ctx: Context<SettleIndividual>) -> Result<()> {
     ed25519::assert_no_cpi(&ctx.accounts.instructions_sysvar, program_id)?;
 
     let ix_data = ed25519::verify_ed25519_ix(&ctx.accounts.instructions_sysvar, 0)?;
+    require!(
+        ix_data.first().copied() == Some(1),
+        VaultError::InvalidEd25519Data
+    );
     let offsets = ed25519::parse_ed25519_offsets(&ix_data, 0)?;
 
     let signer_pubkey = ed25519::extract_pubkey(&ix_data, &offsets)?;
@@ -173,10 +173,6 @@ pub fn handler(ctx: Context<SettleIndividual>) -> Result<()> {
     require!(
         channel.token_id == parsed.token_id,
         VaultError::InvalidTokenMint
-    );
-    require!(
-        channel.lane_generation == parsed.lane_generation,
-        VaultError::InvalidLaneGeneration
     );
     require!(
         channel.payer_id == parsed.payer_id,
@@ -297,7 +293,6 @@ pub fn handler(ctx: Context<SettleIndividual>) -> Result<()> {
         payer_id: channel.payer_id,
         payee_id: channel.payee_id,
         token_id: parsed.token_id,
-        lane_generation: channel.lane_generation,
         amount,
         committed_amount: parsed.committed_amount,
         from_locked,

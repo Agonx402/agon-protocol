@@ -31,7 +31,6 @@ describe("Participant Registration", () => {
       globalConfigBefore.nextParticipantId
     );
     expect(participant.tokenBalances.length).to.equal(0);
-    expect(participant.openChannelCount.toNumber()).to.equal(0);
     expect(participant.inboundChannelPolicy).to.equal(1);
 
     const globalConfig = await program.account.globalConfig.fetch(
@@ -120,6 +119,70 @@ describe("Participant Registration", () => {
     );
   });
 
+  it("does not allow the same wallet to initialize twice", async () => {
+    const [globalConfigPda] = PublicKey.findProgramAddressSync(
+      [Buffer.from("global-config")],
+      program.programId
+    );
+    const participant = await createTestParticipant();
+    const globalConfigBefore = await program.account.globalConfig.fetch(
+      globalConfigPda
+    );
+    const participantBefore = await program.account.participantAccount.fetch(
+      participant.participantPda
+    );
+
+    await expectProgramError(
+      () =>
+        program.methods
+          .initializeParticipant()
+          .accounts({
+            owner: participant.wallet.publicKey,
+            feeRecipient: feeRecipient.publicKey,
+          } as any)
+          .signers([participant.wallet])
+          .rpc(),
+      "already in use"
+    );
+
+    const globalConfigAfter = await program.account.globalConfig.fetch(
+      globalConfigPda
+    );
+    const participantAfter = await program.account.participantAccount.fetch(
+      participant.participantPda
+    );
+
+    expect(globalConfigAfter.nextParticipantId).to.equal(
+      globalConfigBefore.nextParticipantId
+    );
+    expect(participantAfter.participantId).to.equal(
+      participantBefore.participantId
+    );
+    expect(participantAfter.owner.toString()).to.equal(
+      participantBefore.owner.toString()
+    );
+    expect(participantAfter.inboundChannelPolicy).to.equal(
+      participantBefore.inboundChannelPolicy
+    );
+  });
+
+  it("rejects invalid inbound channel policy enum values", async () => {
+    const participant = await createTestParticipant();
+
+    await expectProgramError(
+      () =>
+        program.methods
+          .updateInboundChannelPolicy(99)
+          .accounts({
+            participantAccount: participant.participantPda,
+            owner: participant.wallet.publicKey,
+          } as any)
+          .signers([participant.wallet])
+          .rpc(),
+      "InvalidInboundChannelPolicy"
+    );
+  });
+
   it("should register participant with non-zero fee", async () => {
     const [globalConfigPda] = PublicKey.findProgramAddressSync(
       [Buffer.from("global-config")],
@@ -176,75 +239,5 @@ describe("Participant Registration", () => {
       } as any)
       .signers([deployer])
       .rpc();
-  });
-});
-
-describe("Close Participant", () => {
-  it("should close participant with zero balance", async () => {
-    const { wallet, participantPda } = await createTestParticipant();
-
-    await program.methods
-      .closeParticipant()
-      .accounts({
-        participantAccount: participantPda,
-        owner: wallet.publicKey,
-      } as any)
-      .signers([wallet])
-      .rpc();
-
-    const participant = await program.account.participantAccount.fetchNullable(
-      participantPda
-    );
-    expect(participant).to.equal(null);
-  });
-
-  it("should reject closing a participant while a channel is still open", async () => {
-    const payer = await createTestParticipant();
-    const payee = await createTestParticipant();
-    const { channelPda } = await ensureChannel(
-      payer.wallet,
-      payee.wallet.publicKey,
-      1
-    );
-
-    await expectProgramError(
-      () =>
-        program.methods
-          .closeParticipant()
-          .accounts({
-            participantAccount: payer.participantPda,
-            owner: payer.wallet.publicKey,
-          } as any)
-          .signers([payer.wallet])
-          .rpc(),
-      "OpenChannelsExist"
-    );
-
-    await program.methods
-      .executeCloseChannelInstant(1)
-      .accounts({
-        payerAccount: payer.participantPda,
-        payeeAccount: payee.participantPda,
-        channelState: channelPda,
-        owner: payer.wallet.publicKey,
-        rentRecipient: payer.wallet.publicKey,
-        payeeSigner: payee.wallet.publicKey,
-      } as any)
-      .signers([payer.wallet, payee.wallet])
-      .rpc();
-
-    await program.methods
-      .closeParticipant()
-      .accounts({
-        participantAccount: payer.participantPda,
-        owner: payer.wallet.publicKey,
-      } as any)
-      .signers([payer.wallet])
-      .rpc();
-
-    const participant = await program.account.participantAccount.fetchNullable(
-      payer.participantPda
-    );
-    expect(participant).to.equal(null);
   });
 });

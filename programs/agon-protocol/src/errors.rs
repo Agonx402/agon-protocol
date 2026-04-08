@@ -1,9 +1,9 @@
 //! Agon protocol error codes.
 //!
 //! Taxonomy for client handling:
-//! - **Retriable**: Transient or correctable; retry may succeed (e.g. WithdrawalLocked).
+//! - **Retriable**: Transient or correctable; retry may succeed (e.g. `WithdrawalLocked`).
 //! - **Permanent**: Invalid state/data; retry will fail (e.g. stale commitment).
-//! - **User action**: User must act first (e.g. InsufficientBalance → deposit more).
+//! - **User action**: User must act first (e.g. `InsufficientBalance` -> deposit more).
 
 use anchor_lang::prelude::*;
 
@@ -44,27 +44,12 @@ pub enum VaultError {
     /// Permanent: committed amount must strictly increase (prevents stale replay and nonce burning).
     #[msg("Committed amount must be greater than the previously settled amount")]
     CommitmentAmountMustIncrease,
-    /// User action: Withdraw or settle before closing.
-    #[msg("Balance must be zero to close — withdraw or settle commitments first")]
-    BalanceMustBeZeroToClose,
-    /// User action: Complete or cancel withdrawal before closing.
-    #[msg("Withdrawal must be completed or cancelled before closing")]
-    WithdrawalMustBeClearedToClose,
-    /// User action: Close all channels before closing the participant account.
-    #[msg("All channels must be closed before closing the participant account")]
-    OpenChannelsExist,
     /// Permanent: authority check failed.
     #[msg("Invalid authority signature")]
     InvalidAuthoritySignature,
-    /// Permanent: Replay — do not retry.
+    /// Permanent: Replay - do not retry.
     #[msg("This signature or clearing round has already been used")]
     SignatureAlreadyUsed,
-    /// Permanent: execute_close_channel called without prior request.
-    #[msg("Channel close has not been requested")]
-    ChannelNotClosing,
-    /// Permanent: request_close_channel called when already closing.
-    #[msg("Channel close has already been requested")]
-    ChannelAlreadyClosing,
     #[msg("Participant not found")]
     ParticipantNotFound,
     #[msg("Account participant_id does not match message participant_id")]
@@ -76,7 +61,7 @@ pub enum VaultError {
     FeeRecipientRequired,
     #[msg("Invalid clearing round message format")]
     InvalidClearingRoundMessage,
-    #[msg("Net flow sums do not balance: Σ from ≠ Σ to")]
+    #[msg("Net flow sums do not balance")]
     NetFlowImbalance,
     #[msg("Net position computation overflowed")]
     NetPositionOverflow,
@@ -92,13 +77,11 @@ pub enum VaultError {
     CpiNotAllowed,
     #[msg("Invalid Ed25519 instruction data")]
     InvalidEd25519Data,
-    #[msg("Channel must be initialized before use — call create_channel first")]
+    #[msg("Channel must be initialized before use - call create_channel first")]
     ChannelNotInitialized,
     /// Permanent: create_channel called when channel already exists.
     #[msg("Channel already exists for this payer-payee pair")]
     ChannelAlreadyExists,
-    #[msg("Invalid lane generation")]
-    InvalidLaneGeneration,
     /// Permanent: Only the payee or authorized settler can submit (prevents payer front-run attack).
     #[msg("Only the payee or authorized settler can submit this payment commitment")]
     UnauthorizedSettler,
@@ -106,15 +89,12 @@ pub enum VaultError {
     InboundChannelConsentRequired,
     #[msg("This participant does not accept inbound channels")]
     InboundChannelsDisabled,
-    #[msg("Only the payer or payee can request channel closure")]
-    UnauthorizedChannelCloseRequester,
+    #[msg("Self-channels are not allowed")]
+    SelfChannelNotAllowed,
     #[msg("No authority transfer is currently pending")]
     NoPendingAuthorityTransfer,
     #[msg("Only the nominated pending authority can accept this transfer")]
     UnauthorizedPendingAuthority,
-    /// Permanent: Rent recipient must be the payer's owner.
-    #[msg("Rent recipient must be the payer's owner")]
-    InvalidRentRecipient,
     /// User action: Participant has too many different token balances.
     #[msg("Maximum token balances per participant exceeded")]
     TooManyTokenBalances,
@@ -145,4 +125,12 @@ pub enum VaultError {
     /// Permanent: Token account mint doesn't match registered token.
     #[msg("Token account mint doesn't match registered token")]
     InvalidTokenMint,
+    #[msg("Requested unlock amount exceeds the channel's locked balance")]
+    InsufficientLockedBalance,
+    #[msg("No channel unlock is currently pending")]
+    NoChannelUnlockPending,
+    #[msg("Authorized signer cannot be the zero address or the current signer")]
+    InvalidAuthorizedSigner,
+    #[msg("No authorized signer update is currently pending")]
+    NoAuthorizedSignerUpdatePending,
 }

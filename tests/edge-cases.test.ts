@@ -11,6 +11,7 @@ import {
   ensureChannel,
   expectProgramError,
   createCommitmentMessage,
+  createMultiSigEd25519Instruction,
   nextCommitmentAmount,
 } from "./shared/setup";
 
@@ -69,7 +70,7 @@ describe("Edge cases", () => {
 
     const [channelPda] = PublicKey.findProgramAddressSync(
       [
-        Buffer.from("channel-v1"),
+        Buffer.from("channel-v2"),
         new Uint8Array(new Uint32Array([0]).buffer),
         new Uint8Array(new Uint32Array([3]).buffer), // payee_id 3 for most error edge cases
         new Uint8Array(new Uint16Array([1]).buffer),
@@ -101,7 +102,6 @@ describe("Edge cases", () => {
     const msg = createCommitmentMessage({
       payerId: channel.payerId,
       payeeId: channel.payeeId,
-      laneGeneration: channel.laneGeneration,
       amount: new anchor.BN(2_000_000), // 2 primary-token units
       tokenId: 1, // primary token
     });
@@ -138,7 +138,6 @@ describe("Edge cases", () => {
     const msg = createCommitmentMessage({
       payerId: channel.payerId,
       payeeId: channel.payeeId,
-      laneGeneration: channel.laneGeneration,
       amount: new anchor.BN(2_000_000), // 2 primary-token units
       tokenId: 1, // primary token
       authorizedSettler: user2.publicKey,
@@ -175,7 +174,6 @@ describe("Edge cases", () => {
     const msg = createCommitmentMessage({
       payerId: channel.payerId,
       payeeId: channel.payeeId,
-      laneGeneration: channel.laneGeneration,
       amount: nextCommitmentAmount(channel, 1_000_000),
       tokenId: 1, // primary token
     });
@@ -213,6 +211,36 @@ describe("Edge cases", () => {
     );
   });
 
+  it("settle_individual: rejects Ed25519 instructions with extra signatures", async () => {
+    const { channelPda, payerParticipantPda, payeeParticipantPda, channel } =
+      await ensureChannel(user1, user4.publicKey, 1);
+
+    const msg = createCommitmentMessage({
+      payerId: channel.payerId,
+      payeeId: channel.payeeId,
+      amount: nextCommitmentAmount(channel, 1_000_000),
+      tokenId: 1,
+    });
+
+    const ed25519Ix = createMultiSigEd25519Instruction([user1, user2], msg);
+
+    await expectProgramError(
+      () =>
+        program.methods
+          .settleIndividual()
+          .accounts({
+            channelState: channelPda,
+            payerAccount: payerParticipantPda,
+            payeeAccount: payeeParticipantPda,
+            submitter: user4.publicKey,
+          } as any)
+          .preInstructions([ed25519Ix])
+          .signers([user4])
+          .rpc(),
+      "InvalidEd25519Data"
+    );
+  });
+
   it("commitment message format variations work correctly", async () => {
     const { channelPda, payerParticipantPda, payeeParticipantPda, channel } =
       await ensureChannel(user1, user4.publicKey, 1);
@@ -224,7 +252,6 @@ describe("Edge cases", () => {
     const msgWithFee = createCommitmentMessage({
       payerId: channel.payerId,
       payeeId: channel.payeeId,
-      laneGeneration: channel.laneGeneration,
       amount: nextCommitmentAmount(channel, 1_000_000),
       tokenId: 1, // primary token
       feeAmount: new anchor.BN(10_000), // fee in base units
@@ -262,7 +289,6 @@ describe("Edge cases", () => {
     const msg = createCommitmentMessage({
       payerId: channel.payerId,
       payeeId: channel.payeeId,
-      laneGeneration: channel.laneGeneration,
       amount: nextCommitmentAmount(channel, 1_000_000),
       tokenId: 1, // primary token
       authorizedSettler: user2.publicKey,

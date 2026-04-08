@@ -1,5 +1,7 @@
 # Agon Protocol
 
+This repository's first public commit captures the pre-hackathon baseline, and all later commits reflect simplification, auditing, and protocol changes made during the hackathon.
+
 ## Prerequisites
 
 - Node.js 18+

@@ -39,8 +39,7 @@ export let primaryUserTokenAccount: PublicKey;
 export let user1TokenAccount: PublicKey;
 export let upgradeAuthority: Keypair;
 export const PRIMARY_TOKEN_ID = 1;
-export const TEST_CHAIN_ID = 1;
-export const TEST_MESSAGE_DOMAIN = Buffer.from("agon-test-domain", "utf8");
+export const TEST_CHAIN_ID = 3;
 export const INBOUND_CHANNEL_POLICY = {
   Permissionless: 0,
   ConsentRequired: 1,
@@ -54,7 +53,25 @@ const registeredTokens = new Map<number, RegisteredTokenInfo>();
 const BPF_LOADER_UPGRADEABLE_PROGRAM_ID = new PublicKey(
   "BPFLoaderUpgradeab1e11111111111111111111111"
 );
+const MESSAGE_DOMAIN_TAG = Buffer.from("agon-message-domain-v1", "utf8");
 const knownSigners = new Map<string, Keypair>();
+
+export function deriveMessageDomain(
+  programId: PublicKey,
+  chainId: number
+): Buffer {
+  return createHash("sha256")
+    .update(MESSAGE_DOMAIN_TAG)
+    .update(programId.toBuffer())
+    .update(Buffer.from([chainId & 0xff, (chainId >> 8) & 0xff]))
+    .digest()
+    .subarray(0, 16);
+}
+
+export const TEST_MESSAGE_DOMAIN = deriveMessageDomain(
+  program.programId,
+  TEST_CHAIN_ID
+);
 
 function rememberKnownSigner(signer: Keypair) {
   knownSigners.set(signer.publicKey.toString(), signer);
@@ -181,7 +198,6 @@ before(async () => {
       TEST_CHAIN_ID,
       30,
       new anchor.BN(0),
-      [...TEST_MESSAGE_DOMAIN],
       deployer.publicKey
     ) // 0.3% fee, no registration fee
     .accounts({
@@ -329,23 +345,7 @@ export function findChannelPda(
 ): PublicKey {
   return PublicKey.findProgramAddressSync(
     [
-      Buffer.from("channel-v1"),
-      new Uint8Array(new Uint32Array([payerId]).buffer),
-      new Uint8Array(new Uint32Array([payeeId]).buffer),
-      new Uint8Array(new Uint16Array([tokenId]).buffer),
-    ],
-    program.programId
-  )[0];
-}
-
-export function findLaneStatePda(
-  payerId: number,
-  payeeId: number,
-  tokenId: number = PRIMARY_TOKEN_ID
-): PublicKey {
-  return PublicKey.findProgramAddressSync(
-    [
-      Buffer.from("lane-state"),
+      Buffer.from("channel-v2"),
       new Uint8Array(new Uint32Array([payerId]).buffer),
       new Uint8Array(new Uint32Array([payeeId]).buffer),
       new Uint8Array(new Uint16Array([tokenId]).buffer),
@@ -514,11 +514,6 @@ export async function ensureChannel(
         owner: payer.publicKey,
         payerAccount: payerParticipantPda,
         payeeAccount: payeeParticipantPda,
-        laneState: findLaneStatePda(
-          payerParticipant.participantId,
-          payeeParticipant.participantId,
-          tokenId
-        ),
         payeeOwner: payeeOwnerSigner?.publicKey ?? null,
         channelState: channelPda,
         systemProgram: SystemProgram.programId,
@@ -735,12 +730,11 @@ export function createCrossInstructionMessageEd25519Instruction(
   });
 }
 
-/** Helper to generate cumulative payment commitment message buffer matching the Rust v3 layout. */
+/** Helper to generate cumulative payment commitment message buffer matching the Rust v4 layout. */
 export function createCommitmentMessage(params: {
   payerId: number;
   payeeId: number;
   tokenId: number;
-  laneGeneration: number;
   committedAmount?: anchor.BN;
   amount?: anchor.BN;
   authorizedSettler?: PublicKey;
@@ -761,7 +755,6 @@ export function createCommitmentMessage(params: {
   const bodyBufferParts = [
     Buffer.from(body),
     new anchor.BN(params.tokenId).toArrayLike(Buffer, "le", 2),
-    Buffer.from(encodeCompactU64(BigInt(params.laneGeneration))),
     Buffer.from(encodeCompactU64(BigInt(committedAmount!.toString()))),
   ];
 
@@ -776,7 +769,7 @@ export function createCommitmentMessage(params: {
   }
 
   return Buffer.concat([
-    Buffer.from([0x01, 0x03]),
+    Buffer.from([0x01, 0x04]),
     Buffer.from(params.messageDomain ?? TEST_MESSAGE_DOMAIN),
     Buffer.from([flags]),
     ...bodyBufferParts,
@@ -800,7 +793,7 @@ function encodeCompactU64(value: bigint): number[] {
   return bytes;
 }
 
-/** Helper to generate cooperative clearing-round message buffer matching the Rust v3 layout. */
+/** Helper to generate cooperative clearing-round message buffer matching the Rust v4 layout. */
 export function createClearingRoundMessage(params: {
   tokenId: number;
   messageDomain?: Buffer | Uint8Array;
@@ -808,7 +801,6 @@ export function createClearingRoundMessage(params: {
     participantId: number;
     entries: {
       payeeRef: number;
-      laneGeneration: number;
       targetCumulative: anchor.BN;
     }[];
   }[];
@@ -819,7 +811,6 @@ export function createClearingRoundMessage(params: {
     dynamicParts.push(block.entries.length & 0xff);
     for (const entry of block.entries) {
       dynamicParts.push(entry.payeeRef & 0xff);
-      dynamicParts.push(...encodeCompactU64(BigInt(entry.laneGeneration)));
       dynamicParts.push(
         ...encodeCompactU64(BigInt(entry.targetCumulative.toString()))
       );
@@ -827,7 +818,7 @@ export function createClearingRoundMessage(params: {
   }
 
   return Buffer.concat([
-    Buffer.from([0x02, 0x03]),
+    Buffer.from([0x02, 0x04]),
     Buffer.from(params.messageDomain ?? TEST_MESSAGE_DOMAIN),
     new anchor.BN(params.tokenId).toArrayLike(Buffer, "le", 2),
     Buffer.from([params.blocks.length & 0xff]),

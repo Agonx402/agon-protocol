@@ -40,7 +40,6 @@ describe("Business Logic Edge Cases", () => {
     const commitmentMsg = createCommitmentMessage({
       payerId: channel.payerId,
       payeeId: channel.payeeId,
-      laneGeneration: channel.laneGeneration,
       committedAmount: targetAmount,
       tokenId: 1,
     });
@@ -69,7 +68,6 @@ describe("Business Logic Edge Cases", () => {
           entries: [
             {
               payeeRef: 1,
-              laneGeneration: channel.laneGeneration,
               targetCumulative: targetAmount,
             },
           ],
@@ -130,7 +128,6 @@ describe("Business Logic Edge Cases", () => {
           entries: [
             {
               payeeRef: 1,
-              laneGeneration: channel.laneGeneration,
               targetCumulative: targetAmount,
             },
           ],
@@ -163,7 +160,6 @@ describe("Business Logic Edge Cases", () => {
     const commitmentMsg = createCommitmentMessage({
       payerId: channel.payerId,
       payeeId: channel.payeeId,
-      laneGeneration: channel.laneGeneration,
       committedAmount: targetAmount,
       tokenId: 1,
     });
@@ -337,8 +333,8 @@ describe("Business Logic Edge Cases", () => {
     expect(finalPrimaryTokenBalance?.withdrawingBalance?.toNumber?.() ?? 0).to.equal(
       initialPrimaryTokenBalance?.withdrawingBalance?.toNumber?.() ?? 0
     );
-    expect(finalState.openChannelCount.toNumber()).to.equal(
-      initialState.openChannelCount.toNumber()
+    expect(finalState.inboundChannelPolicy).to.equal(
+      initialState.inboundChannelPolicy
     );
   });
 

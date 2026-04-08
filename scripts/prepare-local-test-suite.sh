@@ -7,8 +7,8 @@ VALIDATOR_BIN="${VALIDATOR_BIN:-$HOME/.local/share/solana/install/active_release
 RPC_URL="${ANCHOR_PROVIDER_URL:-http://127.0.0.1:8899}"
 WALLET="${ANCHOR_WALLET_LINUX:-$REPO_ROOT/keys/devnet-deployer.json}"
 PROGRAM_SO="${PROGRAM_SO:-$REPO_ROOT/target/deploy/agon_protocol.so}"
-PROGRAM_KEYPAIR="${PROGRAM_KEYPAIR:-$REPO_ROOT/target/deploy/agon_protocol-keypair.json}"
 VALIDATOR_LOG="${VALIDATOR_LOG:-/tmp/agon-local-validator.log}"
+PROGRAM_ADDRESS="${PROGRAM_ADDRESS:-$(grep -m1 'declare_id!' "$REPO_ROOT/programs/agon-protocol/src/lib.rs" | sed -E 's/.*"([^"]+)".*/\1/')}"
 
 if [[ ! -x "$SOLANA_BIN" ]]; then
   echo "solana binary not found at $SOLANA_BIN" >&2
@@ -30,15 +30,13 @@ if [[ ! -f "$PROGRAM_SO" ]]; then
   exit 1
 fi
 
-if [[ ! -f "$PROGRAM_KEYPAIR" ]]; then
-  echo "program keypair not found at $PROGRAM_KEYPAIR" >&2
-  exit 1
-fi
-
 pkill -f solana-test-validator >/dev/null 2>&1 || true
 pkill -f solana-faucet >/dev/null 2>&1 || true
 sleep 1
-nohup "$VALIDATOR_BIN" --reset > "$VALIDATOR_LOG" 2>&1 &
+nohup "$VALIDATOR_BIN" \
+  --reset \
+  --upgradeable-program "$PROGRAM_ADDRESS" "$PROGRAM_SO" "$WALLET" \
+  > "$VALIDATOR_LOG" 2>&1 &
 
 READY=0
 for _ in $(seq 1 30); do
@@ -56,7 +54,6 @@ fi
 
 "$SOLANA_BIN" -u "$RPC_URL" airdrop 20 "$WALLET" >/dev/null
 "$SOLANA_BIN" config set --url "$RPC_URL" --keypair "$WALLET" >/dev/null
-"$SOLANA_BIN" program deploy "$PROGRAM_SO" --program-id "$PROGRAM_KEYPAIR" >/dev/null
 
 echo "local validator ready at $RPC_URL"
 echo "wallet: $WALLET"

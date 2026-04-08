@@ -1,23 +1,22 @@
 # Client Message Schemas
 
 Status: Current  
-Date: 2026-04-03
+Date: 2026-04-08
 
 This document describes the only supported signed message formats in the protocol today.
 
-Agon no longer signs legacy channel instance ids, timestamps, or full deployment identifiers.
+Replay protection comes from:
 
-Replay protection now comes from:
-
-- an immutable 16-byte `message_domain` stored in `GlobalConfig`
+- an immutable 16-byte `message_domain` derived in-program from `program_id` and an environment-specific `chain_id`
 - the signed `token_id`
 - the signed payer/payee participant ids
-- the signed `lane_generation` copied into `ChannelState` on channel creation
 - monotonic `committed_amount` / `target_cumulative`
 
-## `agon-cmt-v3`
+Participant IDs are permanent for the lifetime of a deployment, and payment lanes are permanent per `payer_id + payee_id + token_id`.
 
-`agon-cmt-v3` is the unilateral cumulative commitment format used by:
+## `agon-cmt-v4`
+
+`agon-cmt-v4` is the unilateral cumulative commitment format used by:
 
 - `settle_individual`
 - `settle_commitment_bundle`
@@ -27,7 +26,7 @@ Replay protection now comes from:
 | Offset | Size | Field |
 | ------ | ---- | ----- |
 | `0` | `1` | `message_kind = 0x01` |
-| `1` | `1` | `version = 0x03` |
+| `1` | `1` | `version = 0x04` |
 | `2` | `16` | `message_domain` |
 | `18` | `1` | `flags` |
 
@@ -43,35 +42,32 @@ After the fixed header, fields are encoded in this order:
 1. `payer_id` as compact unsigned varint
 2. `payee_id` as compact unsigned varint
 3. `token_id` as `u16` little endian
-4. `lane_generation` as compact unsigned varint
-5. `committed_amount` as compact unsigned varint
-6. optional `authorized_settler` as 32 raw bytes
-7. optional `fee_amount` as compact unsigned varint
-8. optional `fee_recipient_id` as compact unsigned varint
+4. `committed_amount` as compact unsigned varint
+5. optional `authorized_settler` as 32 raw bytes
+6. optional `fee_amount` as compact unsigned varint
+7. optional `fee_recipient_id` as compact unsigned varint
 
 ### Settlement Rules
 
 - The Ed25519 signer must match `channel_state.authorized_signer`.
 - `message_domain` must equal `global_config.message_domain`.
 - `payer_id`, `payee_id`, and `token_id` must match the target channel.
-- `lane_generation` must equal `channel_state.lane_generation`.
 - `committed_amount` must be strictly greater than `channel_state.settled_cumulative`.
-- The settled delta is:
-  - `committed_amount - settled_cumulative`
+- The settled delta is `committed_amount - settled_cumulative`.
 - The submitter must be:
   - the payee owner, or
   - the encoded `authorized_settler`
 
-## `agon-round-v3`
+## `agon-round-v4`
 
-`agon-round-v3` is the cooperative clearing-round format used by `settle_clearing_round`.
+`agon-round-v4` is the cooperative clearing-round format used by `settle_clearing_round`.
 
 ### Fixed Header
 
 | Offset | Size | Field |
 | ------ | ---- | ----- |
 | `0` | `1` | `message_kind = 0x02` |
-| `1` | `1` | `version = 0x03` |
+| `1` | `1` | `version = 0x04` |
 | `2` | `16` | `message_domain` |
 | `18` | `2` | `token_id` (`u16`, little endian) |
 | `20` | `1` | `participant_count` (`u8`) |
@@ -89,8 +85,7 @@ Each participant block is:
 Each channel entry is:
 
 1. `payee_ref` as `u8`
-2. `lane_generation` as compact unsigned varint
-3. `target_cumulative` as compact unsigned varint
+2. `target_cumulative` as compact unsigned varint
 
 `payee_ref` is the zero-based index of the credited participant block inside the signed participant roster.
 
@@ -103,7 +98,6 @@ Each channel entry is:
 - For each included channel:
   - the payer must equal the enclosing block's `participant_id`
   - the payee must equal the participant referenced by `payee_ref`
-  - `lane_generation` must equal `channel_state.lane_generation`
   - `target_cumulative` must be strictly greater than `settled_cumulative`
 - The round must carry one Ed25519 signature per participant block today.
 
@@ -111,7 +105,7 @@ Each channel entry is:
 
 The live cooperative path today is:
 
-- one shared `agon-round-v3` message
+- one shared `agon-round-v4` message
 - one Ed25519 signature per participant
 - optional v0 transactions with Address Lookup Tables to compress account keys
 

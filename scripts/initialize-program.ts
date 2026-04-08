@@ -15,8 +15,9 @@ const VAULT_TOKEN_ACCOUNT_SEED = "vault-token-account";
 const BPF_LOADER_UPGRADEABLE_PROGRAM_ID = new PublicKey(
   "BPFLoaderUpgradeab1e11111111111111111111111"
 );
+const MESSAGE_DOMAIN_TAG = Buffer.from("agon-message-domain-v1", "utf8");
 
-type SupportedNetwork = "devnet" | "mainnet" | "localnet";
+type SupportedNetwork = "devnet" | "mainnet" | "testnet" | "localnet";
 
 interface AllowlistedTokenInput {
   id: number;
@@ -163,11 +164,26 @@ function inferNetwork(rpcEndpoint: string): SupportedNetwork {
   if (rpcEndpoint.includes("devnet")) {
     return "devnet";
   }
+  if (rpcEndpoint.includes("testnet")) {
+    return "testnet";
+  }
+  if (rpcEndpoint.includes("127.0.0.1") || rpcEndpoint.includes("localhost")) {
+    return "localnet";
+  }
   return "localnet";
 }
 
 function chainIdForNetwork(network: SupportedNetwork): number {
-  return network === "mainnet" ? 0 : 1;
+  switch (network) {
+    case "mainnet":
+      return 0;
+    case "devnet":
+      return 1;
+    case "testnet":
+      return 2;
+    case "localnet":
+      return 3;
+  }
 }
 
 function parseAllowlistedTokens(
@@ -408,6 +424,7 @@ async function initializeProgram(): Promise<DeploymentConfig> {
     BPF_LOADER_UPGRADEABLE_PROGRAM_ID
   );
   const messageDomain = createHash("sha256")
+    .update(MESSAGE_DOMAIN_TAG)
     .update(program.programId.toBuffer())
     .update(Buffer.from([chainId & 0xff, (chainId >> 8) & 0xff]))
     .digest()
@@ -428,7 +445,6 @@ async function initializeProgram(): Promise<DeploymentConfig> {
       chainId,
       30,
       new anchor.BN(0),
-      [...messageDomain],
       desiredInitialAuthority
     ) as any)
       .accounts({
@@ -496,6 +512,15 @@ async function initializeProgram(): Promise<DeploymentConfig> {
   }
 
   globalConfig = await program.account.globalConfig.fetch(globalConfigPda);
+  const expectedMessageDomainHex = Buffer.from(messageDomain).toString("hex");
+  const actualMessageDomainHex = Buffer.from(globalConfig.messageDomain).toString(
+    "hex"
+  );
+  if (actualMessageDomainHex !== expectedMessageDomainHex) {
+    throw new Error(
+      `GlobalConfig message_domain mismatch: expected ${expectedMessageDomainHex}, got ${actualMessageDomainHex}`
+    );
+  }
   const tokens = await buildDeploymentTokens(
     program,
     provider,
