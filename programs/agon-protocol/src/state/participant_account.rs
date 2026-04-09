@@ -450,7 +450,7 @@ mod tests {
             .expect("participant should serialize");
 
         assert_eq!(ParticipantAccount::BASE_SPACE, 57);
-        assert_eq!(serialized.len(), ParticipantAccount::SPACE - 8);
+        assert_eq!(serialized.len(), ParticipantAccount::SPACE);
     }
 
     #[test]
@@ -460,7 +460,7 @@ mod tests {
             sample_token_balance(2, 20),
         ]);
 
-        let mut account_data = vec![0u8; 8];
+        let mut account_data = Vec::new();
         participant
             .try_serialize(&mut account_data)
             .expect("participant should serialize");
@@ -509,7 +509,7 @@ mod tests {
     #[test]
     fn raw_readers_reject_wrong_discriminator() {
         let participant = sample_participant(vec![sample_token_balance(1, 10)]);
-        let mut account_data = vec![0u8; 8];
+        let mut account_data = Vec::new();
         participant
             .try_serialize(&mut account_data)
             .expect("participant should serialize");

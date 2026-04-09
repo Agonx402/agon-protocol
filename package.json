@@ -10,7 +10,9 @@
     "deploy:devnet": "./scripts/deploy.sh --network=devnet",
     "deploy:mainnet": "./scripts/deploy.sh --network=mainnet",
     "setup:wallet": "./scripts/setup-wallet.sh",
-    "demo:agon-protocol": "./scripts/agon-protocol-demo.sh"
+    "demo:agon-protocol": "./scripts/agon-protocol-demo.sh",
+    "benchmarks:generate": "ts-node scripts/export-benchmarks.ts",
+    "benchmarks:docs": "ts-node scripts/export-benchmarks.ts --docs-only"
   },
   "dependencies": {
     "@coral-xyz/anchor": "^0.32.1",
@@ -22,6 +24,7 @@
     "@types/bn.js": "^5.1.0",
     "@types/chai": "^4.3.0",
     "@types/mocha": "^9.0.0",
+    "@types/node": "^24.9.1",
     "chai": "^4.3.4",
     "mocha": "^9.0.3",
     "prettier": "^2.6.2",

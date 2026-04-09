@@ -427,3 +427,186 @@ pub struct SettleClearingRound<'info> {
     #[account(address = anchor_lang::solana_program::sysvar::instructions::ID)]
     pub instructions_sysvar: UncheckedAccount<'info>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::GlobalConfig;
+    use proptest::prelude::*;
+    use std::collections::{BTreeMap, BTreeSet};
+
+    fn test_global_config(message_domain: [u8; 16]) -> GlobalConfig {
+        GlobalConfig {
+            authority: Pubkey::default(),
+            fee_recipient: Pubkey::default(),
+            fee_bps: 0,
+            withdrawal_timelock_seconds: 0,
+            registration_fee_lamports: 0,
+            next_participant_id: 1,
+            bump: 0,
+            chain_id: GlobalConfig::DEVNET_CHAIN_ID,
+            message_domain,
+            pending_authority: Pubkey::default(),
+            _reserved: [0u8; 14],
+        }
+    }
+
+    fn encode_varint_u64(mut value: u64) -> Vec<u8> {
+        let mut out = Vec::new();
+        loop {
+            let mut byte = (value & 0x7f) as u8;
+            value >>= 7;
+            if value > 0 {
+                byte |= 0x80;
+            }
+            out.push(byte);
+            if value == 0 {
+                break;
+            }
+        }
+        out
+    }
+
+    fn encode_varint_u32(value: u32) -> Vec<u8> {
+        encode_varint_u64(value as u64)
+    }
+
+    fn build_clearing_round_message_bytes(
+        message_domain: [u8; 16],
+        token_id: u16,
+        blocks: &[(u32, Vec<(u8, u64)>)],
+    ) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.push(CLEARING_ROUND_MESSAGE_KIND);
+        out.push(CLEARING_ROUND_MESSAGE_VERSION);
+        out.extend_from_slice(&message_domain);
+        out.extend_from_slice(&token_id.to_le_bytes());
+        out.push(blocks.len() as u8);
+        for (participant_id, entries) in blocks {
+            out.extend_from_slice(&encode_varint_u32(*participant_id));
+            out.push(entries.len() as u8);
+            for (payee_ref, target_cumulative) in entries {
+                out.push(*payee_ref);
+                out.extend_from_slice(&encode_varint_u64(*target_cumulative));
+            }
+        }
+        out
+    }
+
+    fn blocks_strategy() -> impl Strategy<Value = Vec<(u32, Vec<(u8, u64)>)>> {
+        (1usize..=5).prop_flat_map(|participant_count| {
+            prop::collection::vec(
+                (
+                    1u32..=10_000u32,
+                    prop::collection::vec(
+                        (0u8..participant_count as u8, 1u64..=1_000_000u64),
+                        0..=3,
+                    ),
+                ),
+                participant_count,
+            )
+            .prop_filter("participant ids must be unique", |blocks| {
+                let ids: BTreeSet<_> = blocks
+                    .iter()
+                    .map(|(participant_id, _)| *participant_id)
+                    .collect();
+                ids.len() == blocks.len()
+            })
+        })
+    }
+
+    proptest! {
+        #[test]
+        fn clearing_round_layout_round_trips_random_v4_blocks(
+            token_id in any::<u16>(),
+            message_domain in any::<[u8; 16]>(),
+            blocks in blocks_strategy(),
+        ) {
+            let config = test_global_config(message_domain);
+            let message = build_clearing_round_message_bytes(message_domain, token_id, &blocks);
+            let parsed = parse_clearing_round_layout(&message, &config).unwrap();
+
+            prop_assert_eq!(parsed.token_id, token_id);
+            prop_assert_eq!(parsed.blocks.len(), blocks.len());
+            prop_assert_eq!(
+                parsed.channel_count,
+                blocks.iter().map(|(_, entries)| entries.len()).sum::<usize>()
+            );
+
+            for (index, block) in parsed.blocks.iter().enumerate() {
+                prop_assert_eq!(block.participant_id, blocks[index].0);
+                prop_assert_eq!(block.entry_count as usize, blocks[index].1.len());
+            }
+        }
+
+        #[test]
+        fn clearing_round_position_aggregation_matches_naive_netting(
+            participant_count in 3u8..=6u8,
+            edges in prop::collection::vec(
+                (0u8..6u8, 0u8..6u8, 1u64..=250_000u64, 0u64..=250_000u64),
+                1..=16
+            )
+        ) {
+            let filtered_edges: Vec<_> = edges
+                .into_iter()
+                .filter(|(payer, payee, _, _)| payer < &participant_count && payee < &participant_count && payer != payee)
+                .collect();
+            prop_assume!(!filtered_edges.is_empty());
+
+            let mut positions: Vec<(u32, i128)> = Vec::new();
+            let mut naive_positions = BTreeMap::<u32, i128>::new();
+            let mut total_locked_before = 0u128;
+            let mut total_locked_after = 0u128;
+
+            for (payer, payee, delta, locked_balance) in filtered_edges {
+                let locked_consumed = locked_balance.min(delta);
+                let uncovered_delta = delta - locked_consumed;
+                let payer_id = payer as u32 + 1;
+                let payee_id = payee as u32 + 1;
+
+                add_position(&mut positions, payer_id, -(uncovered_delta as i128)).unwrap();
+                add_position(&mut positions, payee_id, delta as i128).unwrap();
+
+                *naive_positions.entry(payer_id).or_insert(0) -= uncovered_delta as i128;
+                *naive_positions.entry(payee_id).or_insert(0) += delta as i128;
+
+                total_locked_before += locked_balance as u128;
+                total_locked_after += (locked_balance - locked_consumed) as u128;
+            }
+
+            for (participant_id, expected_position) in naive_positions {
+                let actual = positions
+                    .iter()
+                    .find(|(candidate_id, _)| *candidate_id == participant_id)
+                    .map(|(_, amount)| *amount)
+                    .unwrap_or(0);
+                prop_assert_eq!(actual, expected_position);
+            }
+
+            let participant_delta_sum: i128 =
+                positions.iter().map(|(_, amount)| *amount).sum();
+            prop_assert_eq!(
+                participant_delta_sum as u128,
+                total_locked_before - total_locked_after
+            );
+            prop_assert_eq!(
+                total_locked_before,
+                total_locked_after + participant_delta_sum as u128
+            );
+        }
+    }
+
+    #[test]
+    fn clearing_round_header_rejects_zero_participants() {
+        let message_domain = [9u8; 16];
+        let config = test_global_config(message_domain);
+        let mut message = Vec::new();
+        message.push(CLEARING_ROUND_MESSAGE_KIND);
+        message.push(CLEARING_ROUND_MESSAGE_VERSION);
+        message.extend_from_slice(&message_domain);
+        message.extend_from_slice(&1u16.to_le_bytes());
+        message.push(0);
+
+        assert!(parse_clearing_round_layout(&message, &config).is_err());
+    }
+}

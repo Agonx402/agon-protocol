@@ -346,3 +346,162 @@ pub struct SettleIndividual<'info> {
     #[account(address = anchor_lang::solana_program::sysvar::instructions::ID)]
     pub instructions_sysvar: UncheckedAccount<'info>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::GlobalConfig;
+    use proptest::prelude::*;
+
+    fn test_global_config(message_domain: [u8; 16]) -> GlobalConfig {
+        GlobalConfig {
+            authority: Pubkey::default(),
+            fee_recipient: Pubkey::default(),
+            fee_bps: 0,
+            withdrawal_timelock_seconds: 0,
+            registration_fee_lamports: 0,
+            next_participant_id: 1,
+            bump: 0,
+            chain_id: GlobalConfig::DEVNET_CHAIN_ID,
+            message_domain,
+            pending_authority: Pubkey::default(),
+            _reserved: [0u8; 14],
+        }
+    }
+
+    fn encode_varint_u64(mut value: u64) -> Vec<u8> {
+        let mut out = Vec::new();
+        loop {
+            let mut byte = (value & 0x7f) as u8;
+            value >>= 7;
+            if value > 0 {
+                byte |= 0x80;
+            }
+            out.push(byte);
+            if value == 0 {
+                break;
+            }
+        }
+        out
+    }
+
+    fn encode_varint_u32(value: u32) -> Vec<u8> {
+        encode_varint_u64(value as u64)
+    }
+
+    fn build_commitment_message_bytes(
+        message_domain: [u8; 16],
+        payer_id: u32,
+        payee_id: u32,
+        token_id: u16,
+        committed_amount: u64,
+        authorized_settler: Option<Pubkey>,
+        fee: Option<(u64, u32)>,
+    ) -> Vec<u8> {
+        let mut flags = 0u8;
+        if authorized_settler.is_some() {
+            flags |= COMMITMENT_FLAG_AUTHORIZED_SETTLER;
+        }
+        if fee.is_some() {
+            flags |= COMMITMENT_FLAG_FEE;
+        }
+
+        let mut out = Vec::new();
+        out.push(COMMITMENT_MESSAGE_KIND);
+        out.push(COMMITMENT_MESSAGE_VERSION);
+        out.extend_from_slice(&message_domain);
+        out.push(flags);
+        out.extend_from_slice(&encode_varint_u32(payer_id));
+        out.extend_from_slice(&encode_varint_u32(payee_id));
+        out.extend_from_slice(&token_id.to_le_bytes());
+        out.extend_from_slice(&encode_varint_u64(committed_amount));
+        if let Some(settler) = authorized_settler {
+            out.extend_from_slice(settler.as_ref());
+        }
+        if let Some((fee_amount, fee_recipient_id)) = fee {
+            out.extend_from_slice(&encode_varint_u64(fee_amount));
+            out.extend_from_slice(&encode_varint_u32(fee_recipient_id));
+        }
+        out
+    }
+
+    proptest! {
+        #[test]
+        fn commitment_message_round_trips_random_v4_payloads(
+            payer_id in any::<u32>(),
+            payee_id in any::<u32>(),
+            token_id in any::<u16>(),
+            committed_amount in 0u64..=u32::MAX as u64,
+            authorized_settler_bytes in proptest::option::of(any::<[u8; 32]>()),
+            fee in proptest::option::of((0u64..=1_000_000u64, any::<u32>())),
+            message_domain in any::<[u8; 16]>(),
+        ) {
+            let authorized_settler =
+                authorized_settler_bytes.map(Pubkey::new_from_array);
+            let config = test_global_config(message_domain);
+            let message = build_commitment_message_bytes(
+                message_domain,
+                payer_id,
+                payee_id,
+                token_id,
+                committed_amount,
+                authorized_settler,
+                fee,
+            );
+
+            let parsed = parse_commitment_message(&message, &config).unwrap();
+            prop_assert_eq!(parsed.payer_id, payer_id);
+            prop_assert_eq!(parsed.payee_id, payee_id);
+            prop_assert_eq!(parsed.token_id, token_id);
+            prop_assert_eq!(parsed.committed_amount, committed_amount);
+            prop_assert_eq!(parsed.authorized_settler, authorized_settler);
+            prop_assert_eq!(parsed.fee_amount, fee.map(|value| value.0).unwrap_or(0));
+            prop_assert_eq!(parsed.fee_recipient_id, fee.map(|value| value.1).unwrap_or(0));
+        }
+
+        #[test]
+        fn individual_settlement_preserves_total_value_across_locked_and_shared_balances(
+            amount in 1u64..=1_000_000u64,
+            fee_amount in 0u64..=100_000u64,
+            locked_balance in 0u64..=1_000_000u64,
+            payer_shared_balance in 0u64..=1_000_000u64,
+            payee_balance in 0u64..=1_000_000u64,
+            fee_recipient_balance in 0u64..=1_000_000u64,
+        ) {
+            let total_debit = amount.checked_add(fee_amount).unwrap();
+            prop_assume!(locked_balance.checked_add(payer_shared_balance).unwrap() >= total_debit);
+
+            let locked_consumed = locked_balance.min(total_debit);
+            let shared_debit = total_debit - locked_consumed;
+
+            let before_total = locked_balance as u128
+                + payer_shared_balance as u128
+                + payee_balance as u128
+                + fee_recipient_balance as u128;
+            let after_total = (locked_balance - locked_consumed) as u128
+                + (payer_shared_balance - shared_debit) as u128
+                + (payee_balance + amount) as u128
+                + (fee_recipient_balance + fee_amount) as u128;
+
+            prop_assert_eq!(before_total, after_total);
+        }
+    }
+
+    #[test]
+    fn commitment_message_rejects_truncated_authorized_settler() {
+        let message_domain = [7u8; 16];
+        let config = test_global_config(message_domain);
+        let mut message = build_commitment_message_bytes(
+            message_domain,
+            1,
+            2,
+            1,
+            500,
+            Some(Pubkey::new_unique()),
+            None,
+        );
+        message.pop();
+
+        assert!(parse_commitment_message(&message, &config).is_err());
+    }
+}

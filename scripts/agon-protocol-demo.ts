@@ -33,6 +33,12 @@ import * as fs from "fs";
 import * as path from "path";
 import { AgonProtocol } from "../target/types/agon_protocol";
 import {
+  type BenchmarkShape,
+  type DemoBenchmarkScenario,
+  computeSavingsMetrics,
+  explorerUrl as buildExplorerUrl,
+} from "./lib/benchmark-artifacts";
+import {
   type ClearingRoundCapacitySummary,
   LEGACY_PACKET_DATA_SIZE,
   measureClearingRoundCapacity,
@@ -78,10 +84,6 @@ const DEFAULT_BILATERAL_REVERSE_COMMITMENT_COUNT = 200;
 const DEFAULT_BILATERAL_AMOUNT_PER_COMMITMENT = 0.1;
 const DEFAULT_MULTILATERAL_EDGE_COMMITMENT_COUNT = 220;
 const DEFAULT_MULTILATERAL_AMOUNT_PER_COMMITMENT = 0.1;
-const CURRENT_EXECUTABLE_V0_ALT_MULTILATERAL = {
-  participantCount: 4,
-  channelCount: 6,
-} as const;
 const X402_SOLANA_COST_PER_TX_USD = 0.0008;
 const SIGNED_COMMITMENT_PREVIEW_COUNT = 4;
 const PKCS8_ED25519_PREFIX = Buffer.from(
@@ -235,10 +237,18 @@ type ScenarioSignatureMap = {
   multilateralClearing: string;
 };
 
-type MultilateralScenarioResult = {
-  signature: string;
+type ScenarioResult = {
+  primarySignature: string;
+  benchmark: DemoBenchmarkScenario;
+};
+
+type MultilateralScenarioResult = ScenarioResult & {
   settledChannelCount: number;
-  serializedTxBytes: number;
+};
+
+type MultilateralSearchTarget = {
+  balanced: BenchmarkShape;
+  overall: BenchmarkShape;
 };
 
 type DemoManifestWallet = {
@@ -265,6 +275,7 @@ type DemoRunManifest = {
   };
   feeRecipient: string;
   wallets: DemoManifestWallet[];
+  messageDomain?: string;
 };
 
 function loadConfigFile(
@@ -1162,22 +1173,56 @@ function logCapacityMeasurement(
   );
 }
 
+function determineMultilateralSearchTargets(
+  summary: ClearingRoundCapacitySummary,
+  availableParticipants: number
+): MultilateralSearchTarget {
+  const balancedParticipantCount = Math.max(
+    3,
+    Math.min(summary.currentV0AltCycle.participantCount, availableParticipants)
+  );
+  const balancedChannelCount = Math.min(
+    summary.currentV0AltCycle.channelCount,
+    balancedParticipantCount * (balancedParticipantCount - 1)
+  );
+  const overallParticipantCount = Math.max(
+    3,
+    Math.min(summary.currentV0AltOverall.participantCount, availableParticipants)
+  );
+  const overallChannelCount = Math.min(
+    summary.currentV0AltOverall.channelCount,
+    overallParticipantCount * (overallParticipantCount - 1)
+  );
+
+  return {
+    balanced: {
+      participantCount: balancedParticipantCount,
+      channelCount: balancedChannelCount,
+    },
+    overall: {
+      participantCount: overallParticipantCount,
+      channelCount: overallChannelCount,
+    },
+  };
+}
+
 function logClearingRoundCapacityAnalysis(
   programId: PublicKey,
   summary: ClearingRoundCapacitySummary,
-  liveExecutedChannelCount: number
+  requestedShape: BenchmarkShape,
+  achievedShape: BenchmarkShape
 ): void {
-  const targetExecutableV0Alt = measureClearingRoundCapacity({
+  const requestedExecutableV0Alt = measureClearingRoundCapacity({
     programId,
     mode: "current-ed25519-v0-alt",
-    participantCount: CURRENT_EXECUTABLE_V0_ALT_MULTILATERAL.participantCount,
-    channelCount: CURRENT_EXECUTABLE_V0_ALT_MULTILATERAL.channelCount,
+    participantCount: requestedShape.participantCount,
+    channelCount: requestedShape.channelCount,
   });
   const liveExecutableV0Alt = measureClearingRoundCapacity({
     programId,
     mode: "current-ed25519-v0-alt",
-    participantCount: CURRENT_EXECUTABLE_V0_ALT_MULTILATERAL.participantCount,
-    channelCount: liveExecutedChannelCount,
+    participantCount: achievedShape.participantCount,
+    channelCount: achievedShape.channelCount,
   });
 
   logSection("Clearing Round Capacity");
@@ -1204,24 +1249,81 @@ function logClearingRoundCapacityAnalysis(
     summary.blsV0AltOverall
   );
   if (
-    liveExecutedChannelCount !==
-    CURRENT_EXECUTABLE_V0_ALT_MULTILATERAL.channelCount
+    achievedShape.participantCount !== requestedShape.participantCount ||
+    achievedShape.channelCount !== requestedShape.channelCount
   ) {
     logStep(
-      `The live demo fell back from the 4-participant / ${CURRENT_EXECUTABLE_V0_ALT_MULTILATERAL.channelCount}-channel target to 4 participants / ${liveExecutedChannelCount} channels because current program runtime overhead still dominates before the byte ceiling.`
+      `The live demo fell back from the requested ${requestedShape.participantCount}-participant / ${requestedShape.channelCount}-channel target to ${achievedShape.participantCount} participants / ${achievedShape.channelCount} channels because current runtime overhead still dominates before the byte ceiling.`
     );
     logCapacityMeasurement(
       "Largest balanced round targeted by the current local/runtime profile",
-      targetExecutableV0Alt
+      requestedExecutableV0Alt
     );
   } else {
     logStep(
-      `Today the 4-participant / 12-channel byte-fit shape is still too heavy for the current program runtime, so the demo uses the real executable ceiling: 4 participants / ${liveExecutedChannelCount} channels.`
+      `The requested ${requestedShape.participantCount}-participant / ${requestedShape.channelCount}-channel target executed successfully on the current devnet deployment.`
     );
   }
   logStep(
     "BLS helps with signer/auth overhead, but every included channel still has to be advanced, so the next bottleneck after BLS is program-side state handling rather than transaction bytes."
   );
+}
+
+function createBenchmarkScenario(params: {
+  id: DemoBenchmarkScenario["id"];
+  title: string;
+  settlementMode: DemoBenchmarkScenario["settlementMode"];
+  participantCount: number;
+  channelCount: number;
+  underlyingPaymentCount: number;
+  grossValueRaw: number;
+  decimals: number;
+  tokenSymbol: string;
+  signatures: string[];
+  serializedTransactionBytes: number[];
+  signedMessageBytes: number;
+  signatureCount: number;
+  participantBalanceWrites: number;
+  channelStateWrites: number;
+  notes?: string[];
+  requestedShape?: BenchmarkShape;
+  achievedShape?: BenchmarkShape;
+}): DemoBenchmarkScenario {
+  const savings = computeSavingsMetrics({
+    underlyingPaymentCount: params.underlyingPaymentCount,
+    settlementTransactionCount: params.signatures.length,
+  });
+
+  return {
+    id: params.id,
+    title: params.title,
+    settlementMode: params.settlementMode,
+    participantCount: params.participantCount,
+    channelCount: params.channelCount,
+    underlyingPaymentCount: params.underlyingPaymentCount,
+    grossValueRaw: params.grossValueRaw.toString(),
+    grossValueFormatted: `${formatAmount(
+      params.grossValueRaw,
+      params.decimals
+    )} ${params.tokenSymbol}`,
+    settlementTransactionCount: params.signatures.length,
+    signatures: params.signatures,
+    explorerLinks: params.signatures.map((signature) => explorerUrl(signature)),
+    serializedTransactionBytes: params.serializedTransactionBytes,
+    totalSerializedTransactionBytes: params.serializedTransactionBytes.reduce(
+      (sum, value) => sum + value,
+      0
+    ),
+    signedMessageBytes: params.signedMessageBytes,
+    signatureCount: params.signatureCount,
+    participantBalanceWrites: params.participantBalanceWrites,
+    channelStateWrites: params.channelStateWrites,
+    baselineModel: savings.baselineModel,
+    savings,
+    notes: params.notes ?? [],
+    requestedShape: params.requestedShape,
+    achievedShape: params.achievedShape,
+  };
 }
 
 function logSavingsComparison(
@@ -1273,7 +1375,52 @@ function logStep(message: string): void {
 }
 
 function explorerUrl(signature: string): string {
-  return `https://explorer.solana.com/tx/${signature}?cluster=devnet`;
+  return buildExplorerUrl(signature, "devnet");
+}
+
+async function fetchSerializedTransactionBytes(
+  connection: Connection,
+  signature: string
+): Promise<number> {
+  const response = await (connection as any)._rpcRequest("getTransaction", [
+    signature,
+    {
+      commitment: "confirmed",
+      encoding: "base64",
+      maxSupportedTransactionVersion: 0,
+    },
+  ]);
+  const encoded = response?.result?.transaction;
+  if (!Array.isArray(encoded) || typeof encoded[0] !== "string") {
+    throw new Error(`Unable to fetch raw transaction bytes for ${signature}`);
+  }
+  return Buffer.from(encoded[0], "base64").length;
+}
+
+async function selectFeeSponsor(
+  connection: Connection,
+  candidates: Keypair[]
+): Promise<Keypair> {
+  const uniqueCandidates = new Map<string, Keypair>();
+  for (const candidate of candidates) {
+    uniqueCandidates.set(candidate.publicKey.toBase58(), candidate);
+  }
+
+  let bestCandidate: Keypair | null = null;
+  let bestBalance = -1;
+  for (const candidate of uniqueCandidates.values()) {
+    const balance = await connection.getBalance(candidate.publicKey, "confirmed");
+    if (balance > bestBalance) {
+      bestBalance = balance;
+      bestCandidate = candidate;
+    }
+  }
+
+  if (!bestCandidate) {
+    throw new Error("No fee sponsor candidates were provided");
+  }
+
+  return bestCandidate;
 }
 
 async function parseProgramEvents(
@@ -1312,7 +1459,8 @@ async function estimateSerializedTransactionBytes(
 async function sendLegacyTransaction(
   connection: Connection,
   feePayer: Keypair,
-  instructions: TransactionInstruction[]
+  instructions: TransactionInstruction[],
+  extraSigners: Keypair[] = []
 ): Promise<string> {
   const { blockhash, lastValidBlockHeight } =
     await connection.getLatestBlockhash("confirmed");
@@ -1320,7 +1468,7 @@ async function sendLegacyTransaction(
     feePayer: feePayer.publicKey,
     recentBlockhash: blockhash,
   }).add(...instructions);
-  transaction.sign(feePayer);
+  transaction.sign(feePayer, ...extraSigners);
   const signature = await connection.sendRawTransaction(
     transaction.serialize(),
     {
@@ -1337,6 +1485,7 @@ async function sendLegacyTransaction(
 async function createLookupTableForAddresses(
   connection: Connection,
   authority: Keypair,
+  payer: Keypair,
   addresses: PublicKey[]
 ): Promise<AddressLookupTableAccount> {
   const recentSlotBackoffs = [5, 10, 20, 40];
@@ -1350,13 +1499,18 @@ async function createLookupTableForAddresses(
     const [createIx, candidateLookupTableAddress] =
       AddressLookupTableProgram.createLookupTable({
         authority: authority.publicKey,
-        payer: authority.publicKey,
+        payer: payer.publicKey,
         recentSlot,
       });
     lookupTableAddress = candidateLookupTableAddress;
 
     try {
-      await sendLegacyTransaction(connection, authority, [createIx]);
+      await sendLegacyTransaction(
+        connection,
+        payer,
+        [createIx],
+        payer.publicKey.equals(authority.publicKey) ? [] : [authority]
+      );
       created = true;
       break;
     } catch (error) {
@@ -1381,11 +1535,16 @@ async function createLookupTableForAddresses(
   for (let offset = 0; offset < addresses.length; offset += chunkSize) {
     const extendIx = AddressLookupTableProgram.extendLookupTable({
       authority: authority.publicKey,
-      payer: authority.publicKey,
+      payer: payer.publicKey,
       lookupTable: lookupTableAddress,
       addresses: addresses.slice(offset, offset + chunkSize),
     });
-    await sendLegacyTransaction(connection, authority, [extendIx]);
+    await sendLegacyTransaction(
+      connection,
+      payer,
+      [extendIx],
+      payer.publicKey.equals(authority.publicKey) ? [] : [authority]
+    );
     lastExtendObservedSlot = await connection.getSlot("confirmed");
   }
 
@@ -1415,6 +1574,7 @@ async function estimateVersionedTransactionBytes(params: {
   feePayer: Keypair;
   instructions: TransactionInstruction[];
   lookupTables: AddressLookupTableAccount[];
+  extraSigners?: Keypair[];
 }): Promise<number> {
   const { blockhash } = await params.connection.getLatestBlockhash("confirmed");
   const message = new TransactionMessage({
@@ -1423,7 +1583,7 @@ async function estimateVersionedTransactionBytes(params: {
     instructions: params.instructions,
   }).compileToV0Message(params.lookupTables);
   const transaction = new VersionedTransaction(message);
-  transaction.sign([params.feePayer]);
+  transaction.sign([params.feePayer, ...(params.extraSigners ?? [])]);
   return transaction.serialize().length;
 }
 
@@ -1432,6 +1592,7 @@ async function sendVersionedTransaction(params: {
   feePayer: Keypair;
   instructions: TransactionInstruction[];
   lookupTables: AddressLookupTableAccount[];
+  extraSigners?: Keypair[];
 }): Promise<string> {
   const { blockhash, lastValidBlockHeight } =
     await params.connection.getLatestBlockhash("confirmed");
@@ -1441,7 +1602,7 @@ async function sendVersionedTransaction(params: {
     instructions: params.instructions,
   }).compileToV0Message(params.lookupTables);
   const transaction = new VersionedTransaction(message);
-  transaction.sign([params.feePayer]);
+  transaction.sign([params.feePayer, ...(params.extraSigners ?? [])]);
   const signature = await params.connection.sendRawTransaction(
     transaction.serialize(),
     {
@@ -2085,7 +2246,7 @@ async function runSingleCommitmentScenario(
   commitmentCount: number,
   amountPerCommitment: number,
   logEvery: number
-): Promise<string> {
+): Promise<ScenarioResult> {
   logSection("Scenario 1/5 - Latest Commitment Settlement");
   const channelPda = await ensureChannel(program, payer, payee, tokenId);
   const channelBefore = await program.account.channelState.fetch(channelPda);
@@ -2134,6 +2295,10 @@ async function runSingleCommitmentScenario(
     .preInstructions([ed25519Instruction])
     .signers([payee.keypair])
     .rpc();
+  const serializedTxBytes = await fetchSerializedTransactionBytes(
+    provider.connection,
+    latestSignature
+  );
   if (shouldLogProgress(1, 1, logEvery)) {
     logStep(
       `  Settled the latest cumulative commitment in 1 tx (latest tx: ${latestSignature})`
@@ -2183,7 +2348,29 @@ async function runSingleCommitmentScenario(
   );
   logStep(`  Explorer: ${explorerUrl(latestSignature)}`);
   await logScenarioEvents(provider, program, latestSignature);
-  return latestSignature;
+  return {
+    primarySignature: latestSignature,
+    benchmark: createBenchmarkScenario({
+      id: "singleCommitment",
+      title: "Scenario 1/5 - Latest Commitment Settlement",
+      settlementMode: "latest-commitment",
+      participantCount: 2,
+      channelCount: 1,
+      underlyingPaymentCount: totalUnderlyingPayments,
+      grossValueRaw: rawAmount * totalUnderlyingPayments,
+      decimals,
+      tokenSymbol,
+      signatures: [latestSignature],
+      serializedTransactionBytes: [serializedTxBytes],
+      signedMessageBytes: message.length,
+      signatureCount: 1,
+      participantBalanceWrites: 2,
+      channelStateWrites: 1,
+      notes: [
+        "One latest cumulative commitment replaces exact-payment settlement on the hot path.",
+      ],
+    }),
+  };
 }
 
 async function runBatchCommitmentScenario(
@@ -2199,7 +2386,7 @@ async function runBatchCommitmentScenario(
   batchSize: number,
   amountPerCommitment: number,
   logEvery: number
-): Promise<string> {
+): Promise<ScenarioResult> {
   logSection("Scenario 2/5 - Commitment Bundle Settlement");
   const selectedPayers = payers.slice(0, batchCount);
   const rawAmount = toRawAmount(amountPerCommitment, decimals);
@@ -2251,7 +2438,7 @@ async function runBatchCommitmentScenario(
     );
   }
 
-  let latestSignature = "";
+  const signatures: string[] = [];
   for (let chunkIndex = 0; chunkIndex < channelChunks.length; chunkIndex += 1) {
     const chunk = channelChunks[chunkIndex];
     const bundleEntries = chunk.map(
@@ -2266,7 +2453,7 @@ async function runBatchCommitmentScenario(
         }),
       })
     );
-    latestSignature = await program.methods
+    const chunkSignature = await program.methods
       .settleCommitmentBundle(bundleEntries.length)
       .accounts({
         tokenRegistry: findTokenRegistryPda(program.programId),
@@ -2284,11 +2471,12 @@ async function runBatchCommitmentScenario(
       .preInstructions([createMultiMessageEd25519Instruction(bundleEntries)])
       .signers([payee.keypair])
       .rpc();
+    signatures.push(chunkSignature);
     if (shouldLogProgress(chunkIndex + 1, channelChunks.length, logEvery)) {
       logStep(
         `  Settled bundle chunk ${chunkIndex + 1}/${channelChunks.length} (${
           chunk.length
-        } channels, latest tx: ${latestSignature})`
+        } channels, latest tx: ${chunkSignature})`
       );
     }
   }
@@ -2360,9 +2548,48 @@ async function runBatchCommitmentScenario(
       )}`
     );
   });
+  const serializedTransactionBytes = await Promise.all(
+    signatures.map((signature) =>
+      fetchSerializedTransactionBytes(provider.connection, signature)
+    )
+  );
+  const latestSignature = signatures[signatures.length - 1];
   logStep(`  Explorer: ${explorerUrl(latestSignature)}`);
   await logScenarioEvents(provider, program, latestSignature);
-  return latestSignature;
+  return {
+    primarySignature: latestSignature,
+    benchmark: createBenchmarkScenario({
+      id: "batchCommitment",
+      title: "Scenario 2/5 - Commitment Bundle Settlement",
+      settlementMode: "bundle",
+      participantCount: selectedPayers.length + 1,
+      channelCount: selectedPayers.length,
+      underlyingPaymentCount: totalUnderlyingPayments,
+      grossValueRaw: totalAmount,
+      decimals,
+      tokenSymbol,
+      signatures,
+      serializedTransactionBytes,
+      signedMessageBytes: channelsBefore.reduce(
+        (sum, { channel, committedAmount }) =>
+          sum +
+          createCommitmentMessage({
+            payerId: channel.payerId,
+            payeeId: channel.payeeId,
+            committedAmount,
+            tokenId,
+            messageDomain,
+          }).length,
+        0
+      ),
+      signatureCount: channelsBefore.length,
+      participantBalanceWrites: selectedPayers.length + 1,
+      channelStateWrites: channelsBefore.length,
+      notes: [
+        "Many unilateral latest commitments settle in payee-side bundle transactions.",
+      ],
+    }),
+  };
 }
 
 async function runUnilateralClearingScenario(
@@ -2379,7 +2606,7 @@ async function runUnilateralClearingScenario(
   payeeBCommitmentCount: number,
   amountPerCommitment: number,
   requestedLockAmount: number
-): Promise<string> {
+): Promise<ScenarioResult> {
   logSection("Scenario 3/5 - Clearing Round (Single Payer)");
   const channelA = await ensureChannel(program, payer, payeeA, tokenId);
   const channelB = await ensureChannel(program, payer, payeeB, tokenId);
@@ -2523,6 +2750,10 @@ async function runUnilateralClearingScenario(
     .preInstructions([ed25519Instruction])
     .signers([payer.keypair])
     .rpc();
+  const serializedTransactionBytes = await Promise.all([
+    fetchSerializedTransactionBytes(provider.connection, lockSignature),
+    fetchSerializedTransactionBytes(provider.connection, signature),
+  ]);
   const channelAAfter = await program.account.channelState.fetch(channelA);
   const channelBAfter = await program.account.channelState.fetch(channelB);
   const payerAfter = await fetchInternalBalance(program, payer, tokenId);
@@ -2583,7 +2814,30 @@ async function runUnilateralClearingScenario(
   );
   logStep(`  Explorer: ${explorerUrl(signature)}`);
   await logScenarioEvents(provider, program, signature);
-  return signature;
+  return {
+    primarySignature: signature,
+    benchmark: createBenchmarkScenario({
+      id: "unilateralClearing",
+      title: "Scenario 3/5 - Clearing Round (Single Payer)",
+      settlementMode: "single-payer-clearing",
+      participantCount: 3,
+      channelCount: 2,
+      underlyingPaymentCount:
+        payeeACommitmentCount + payeeBCommitmentCount,
+      grossValueRaw: settleAAmount + settleBAmount,
+      decimals,
+      tokenSymbol,
+      signatures: [lockSignature, signature],
+      serializedTransactionBytes,
+      signedMessageBytes: message.length,
+      signatureCount: 3,
+      participantBalanceWrites: 4,
+      channelStateWrites: 3,
+      notes: [
+        "One collateral lock plus one cooperative clearing round settles two unilateral lanes.",
+      ],
+    }),
+  };
 }
 
 async function runBilateralClearingScenario(
@@ -2598,7 +2852,7 @@ async function runBilateralClearingScenario(
   forwardCommitmentCount: number,
   reverseCommitmentCount: number,
   amountPerCommitment: number
-): Promise<string> {
+): Promise<ScenarioResult> {
   logSection("Scenario 4/5 - Clearing Round (Bilateral)");
   const channelAB = await ensureChannel(
     program,
@@ -2738,6 +2992,10 @@ async function runBilateralClearingScenario(
     ])
     .signers([participantA.keypair])
     .rpc();
+  const serializedTxBytes = await fetchSerializedTransactionBytes(
+    provider.connection,
+    signature
+  );
   const afterA = await fetchInternalBalance(program, participantA, tokenId);
   const afterB = await fetchInternalBalance(program, participantB, tokenId);
   const afterChannelAB = await program.account.channelState.fetch(channelAB);
@@ -2817,7 +3075,30 @@ async function runBilateralClearingScenario(
   );
   logStep(`  Explorer: ${explorerUrl(signature)}`);
   await logScenarioEvents(provider, program, signature);
-  return signature;
+  return {
+    primarySignature: signature,
+    benchmark: createBenchmarkScenario({
+      id: "bilateralClearing",
+      title: "Scenario 4/5 - Clearing Round (Bilateral)",
+      settlementMode: "bilateral-clearing",
+      participantCount: 2,
+      channelCount: 2,
+      underlyingPaymentCount:
+        forwardCommitmentCount + reverseCommitmentCount,
+      grossValueRaw: grossAToB + grossBToA,
+      decimals,
+      tokenSymbol,
+      signatures: [signature],
+      serializedTransactionBytes: [serializedTxBytes],
+      signedMessageBytes: message.length,
+      signatureCount: 2,
+      participantBalanceWrites: 2,
+      channelStateWrites: 2,
+      notes: [
+        "Two-way obligations collapse to one cooperative round and only residual net balance changes.",
+      ],
+    }),
+  };
 }
 
 async function runMultilateralClearingScenario(
@@ -2873,7 +3154,20 @@ async function runMultilateralClearingScenario(
   let lastAttemptError: unknown = null;
   const rawAmountPerCommitment = toRawAmount(amountPerCommitment, decimals);
   const submitter = participants[0];
+  const providerPayer = (provider.wallet as any).payer as Keypair | undefined;
+  const sponsor = await selectFeeSponsor(provider.connection, [
+    ...(providerPayer ? [providerPayer] : []),
+    ...participants.map((participant) => participant.keypair),
+  ]);
+  const extraSigners = sponsor.publicKey.equals(submitter.keypair.publicKey)
+    ? []
+    : [submitter.keypair];
   const grossAmount = rawAmountPerCommitment * edgeCommitmentCount;
+  if (!sponsor.publicKey.equals(submitter.keypair.publicKey)) {
+    logStep(
+      `Using ${sponsor.publicKey.toString()} as the fee sponsor for the multilateral round while ${submitter.name} remains the signed submitter`
+    );
+  }
 
   for (const candidateChannelCount of candidateChannelCounts) {
     const selectedPairs = orderedPairs.slice(0, candidateChannelCount);
@@ -2959,6 +3253,7 @@ async function runMultilateralClearingScenario(
     const lookupTable = await createLookupTableForAddresses(
       provider.connection,
       submitter.keypair,
+      sponsor,
       [
         findTokenRegistryPda(program.programId),
         findGlobalConfigPda(program.programId),
@@ -2971,15 +3266,17 @@ async function runMultilateralClearingScenario(
     try {
       const candidateTxBytes = await estimateVersionedTransactionBytes({
         connection: provider.connection,
-        feePayer: submitter.keypair,
+        feePayer: sponsor,
         instructions: [ed25519Instruction, clearingRoundInstruction],
         lookupTables: [lookupTable],
+        extraSigners,
       });
       const candidateSignature = await sendVersionedTransaction({
         connection: provider.connection,
-        feePayer: submitter.keypair,
+        feePayer: sponsor,
         instructions: [ed25519Instruction, clearingRoundInstruction],
         lookupTables: [lookupTable],
+        extraSigners,
       });
 
       channelEdges = candidateChannelEdges;
@@ -3165,11 +3462,137 @@ async function runMultilateralClearingScenario(
   );
   logStep(`  Explorer: ${explorerUrl(signature)}`);
   await logScenarioEvents(provider, program, signature);
-  return {
-    signature,
-    settledChannelCount: channelEdges.length,
-    serializedTxBytes: actualV0AltTxBytes,
+  const achievedShape: BenchmarkShape = {
+    participantCount: participants.length,
+    channelCount: channelEdges.length,
   };
+  const requestedShape: BenchmarkShape = {
+    participantCount: participants.length,
+    channelCount,
+  };
+  return {
+    primarySignature: signature,
+    benchmark: createBenchmarkScenario({
+      id: "multilateralClearing",
+      title: "Scenario 5/5 - Clearing Round (Largest Executable v0 + ALT)",
+      settlementMode: "multilateral-clearing",
+      participantCount: participants.length,
+      channelCount: channelEdges.length,
+      underlyingPaymentCount: totalUnderlyingCommitments,
+      grossValueRaw: totalGrossRouted,
+      decimals,
+      tokenSymbol,
+      signatures: [signature],
+      serializedTransactionBytes: [actualV0AltTxBytes],
+      signedMessageBytes: createClearingRoundMessage({
+        tokenId,
+        messageDomain,
+        blocks: roundBlocks.map((block) => ({
+          participantId: block.participant.participantId,
+          entries: block.entries.map((entry) => ({
+            payeeRef: entry.payeeRef,
+            targetCumulative: entry.targetCumulative,
+          })),
+        })),
+      }).length,
+      signatureCount: participants.length,
+      participantBalanceWrites: multilateralParticipantBalanceWrites,
+      channelStateWrites: channelEdges.length,
+      requestedShape,
+      achievedShape,
+      notes: [
+        "Current multilateral rounds still pay per-channel state writes, but they compress settlement transactions and signed payloads.",
+      ],
+    }),
+    settledChannelCount: channelEdges.length,
+  };
+}
+
+async function runLargestExecutableMultilateralScenario(
+  provider: anchor.AnchorProvider,
+  program: Program<AgonProtocol>,
+  messageDomain: Buffer,
+  tokenId: number,
+  tokenSymbol: string,
+  decimals: number,
+  participants: DemoWallet[],
+  targets: MultilateralSearchTarget,
+  edgeCommitmentCount: number,
+  amountPerCommitment: number
+): Promise<MultilateralScenarioResult> {
+  if (participants.length < 3) {
+    throw new Error("At least three funded participants are required");
+  }
+
+  const candidateShapes: BenchmarkShape[] = [];
+  const pushCandidate = (shape: BenchmarkShape): void => {
+    if (
+      shape.participantCount < 3 ||
+      shape.participantCount > participants.length ||
+      shape.channelCount < shape.participantCount
+    ) {
+      return;
+    }
+    if (
+      !candidateShapes.some(
+        (candidate) =>
+          candidate.participantCount === shape.participantCount &&
+          candidate.channelCount === shape.channelCount
+      )
+    ) {
+      candidateShapes.push(shape);
+    }
+  };
+
+  pushCandidate(targets.overall);
+  pushCandidate(targets.balanced);
+  for (
+    let participantCount = Math.min(
+      targets.overall.participantCount,
+      participants.length
+    );
+    participantCount >= 3;
+    participantCount -= 1
+  ) {
+    pushCandidate({
+      participantCount,
+      channelCount: Math.min(
+        targets.overall.channelCount,
+        participantCount * (participantCount - 1)
+      ),
+    });
+    pushCandidate({
+      participantCount,
+      channelCount: Math.min(
+        targets.balanced.channelCount,
+        participantCount * (participantCount - 1)
+      ),
+    });
+  }
+
+  let lastError: unknown = null;
+  for (const shape of candidateShapes) {
+    try {
+      return await runMultilateralClearingScenario(
+        provider,
+        program,
+        messageDomain,
+        tokenId,
+        tokenSymbol,
+        decimals,
+        participants.slice(0, shape.participantCount),
+        shape.channelCount,
+        edgeCommitmentCount,
+        amountPerCommitment
+      );
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  throw lastError instanceof Error
+    ? lastError
+    : new Error("Unable to find an executable multilateral clearing shape");
 }
 
 async function logFinalSummary(
@@ -3300,83 +3723,101 @@ async function main(): Promise<void> {
     options.depositPlan,
     options.skipDeposits
   );
+  const multilateralTargets = determineMultilateralSearchTargets(
+    clearingCapacitySummary,
+    wallets.length
+  );
 
-  const scenarioSignatures: ScenarioSignatureMap = {
-    singleCommitment: await runSingleCommitmentScenario(
-      provider,
-      program,
-      readiness.messageDomain,
-      options.tokenId,
-      options.tokenSymbol,
-      readiness.decimals,
-      wallets[0],
-      wallets[1],
-      options.singleCommitmentCount,
-      options.singleCommitmentAmount,
-      options.singleCommitmentLogEvery
-    ),
-    batchCommitment: await runBatchCommitmentScenario(
-      provider,
-      program,
-      readiness.messageDomain,
-      options.tokenId,
-      options.tokenSymbol,
-      readiness.decimals,
-      wallets.slice(1),
-      wallets[0],
-      options.batchCommitmentBatchCount,
-      options.batchCommitmentBatchSize,
-      options.batchCommitmentAmount,
-      options.batchCommitmentLogEvery
-    ),
-    unilateralClearing: await runUnilateralClearingScenario(
-      provider,
-      program,
-      readiness.messageDomain,
-      options.tokenId,
-      options.tokenSymbol,
-      readiness.decimals,
-      wallets[0],
-      wallets[3],
-      wallets[4],
-      options.unilateralPayeeACommitmentCount,
-      options.unilateralPayeeBCommitmentCount,
-      options.unilateralAmountPerCommitment,
-      options.unilateralLockAmount
-    ),
-    bilateralClearing: await runBilateralClearingScenario(
-      provider,
-      program,
-      readiness.messageDomain,
-      options.tokenId,
-      options.tokenSymbol,
-      readiness.decimals,
-      wallets[1],
-      wallets[2],
-      options.bilateralForwardCommitmentCount,
-      options.bilateralReverseCommitmentCount,
-      options.bilateralAmountPerCommitment
-    ),
-    multilateralClearing: "",
-  };
-  const multilateralScenario = await runMultilateralClearingScenario(
+  const singleScenario = await runSingleCommitmentScenario(
     provider,
     program,
     readiness.messageDomain,
     options.tokenId,
     options.tokenSymbol,
     readiness.decimals,
-    wallets.slice(0, CURRENT_EXECUTABLE_V0_ALT_MULTILATERAL.participantCount),
-    CURRENT_EXECUTABLE_V0_ALT_MULTILATERAL.channelCount,
+    wallets[0],
+    wallets[1],
+    options.singleCommitmentCount,
+    options.singleCommitmentAmount,
+    options.singleCommitmentLogEvery
+  );
+  const batchScenario = await runBatchCommitmentScenario(
+    provider,
+    program,
+    readiness.messageDomain,
+    options.tokenId,
+    options.tokenSymbol,
+    readiness.decimals,
+    wallets.slice(1),
+    wallets[0],
+    options.batchCommitmentBatchCount,
+    options.batchCommitmentBatchSize,
+    options.batchCommitmentAmount,
+    options.batchCommitmentLogEvery
+  );
+  const unilateralScenario = await runUnilateralClearingScenario(
+    provider,
+    program,
+    readiness.messageDomain,
+    options.tokenId,
+    options.tokenSymbol,
+    readiness.decimals,
+    wallets[0],
+    wallets[3],
+    wallets[4],
+    options.unilateralPayeeACommitmentCount,
+    options.unilateralPayeeBCommitmentCount,
+    options.unilateralAmountPerCommitment,
+    options.unilateralLockAmount
+  );
+  const bilateralScenario = await runBilateralClearingScenario(
+    provider,
+    program,
+    readiness.messageDomain,
+    options.tokenId,
+    options.tokenSymbol,
+    readiness.decimals,
+    wallets[1],
+    wallets[2],
+    options.bilateralForwardCommitmentCount,
+    options.bilateralReverseCommitmentCount,
+    options.bilateralAmountPerCommitment
+  );
+  const multilateralScenario = await runLargestExecutableMultilateralScenario(
+    provider,
+    program,
+    readiness.messageDomain,
+    options.tokenId,
+    options.tokenSymbol,
+    readiness.decimals,
+    wallets,
+    multilateralTargets,
     options.multilateralEdgeCommitmentCount,
     options.multilateralAmountPerCommitment
   );
-  scenarioSignatures.multilateralClearing = multilateralScenario.signature;
+  const benchmarkScenarios = [
+    singleScenario.benchmark,
+    batchScenario.benchmark,
+    unilateralScenario.benchmark,
+    bilateralScenario.benchmark,
+    multilateralScenario.benchmark,
+  ];
+  const scenarioSignatures: ScenarioSignatureMap = {
+    singleCommitment: singleScenario.primarySignature,
+    batchCommitment: batchScenario.primarySignature,
+    unilateralClearing: unilateralScenario.primarySignature,
+    bilateralClearing: bilateralScenario.primarySignature,
+    multilateralClearing: multilateralScenario.primarySignature,
+  };
 
   logClearingRoundCapacityAnalysis(
     program.programId,
     clearingCapacitySummary,
-    multilateralScenario.settledChannelCount
+    multilateralScenario.benchmark.requestedShape ?? multilateralTargets.overall,
+    multilateralScenario.benchmark.achievedShape ?? {
+      participantCount: multilateralScenario.benchmark.participantCount,
+      channelCount: multilateralScenario.settledChannelCount,
+    }
   );
 
   await logFinalSummary(
@@ -3407,6 +3848,7 @@ async function main(): Promise<void> {
       vaultTokenAccount: readiness.vaultTokenAccount.toString(),
     },
     feeRecipient: readiness.feeRecipient.toString(),
+    messageDomain: readiness.messageDomain.toString("hex"),
     reusedFromManifest: options.reuseManifestPath,
     settings: {
       skipFunding: options.skipFunding,
@@ -3435,6 +3877,7 @@ async function main(): Promise<void> {
       tokenAccount: wallet.tokenAccount.toString(),
       secretPath: wallet.secretPath,
     })),
+    benchmarkScenarios,
     scenarios: scenarioSignatures,
     explorer: Object.fromEntries(
       Object.entries(scenarioSignatures).map(([name, signature]) => [
@@ -3460,6 +3903,7 @@ async function main(): Promise<void> {
         vaultTokenAccount: readiness.vaultTokenAccount.toString(),
       },
       feeRecipient: readiness.feeRecipient.toString(),
+      messageDomain: readiness.messageDomain.toString("hex"),
       reusedFromManifest: options.reuseManifestPath,
       settings: {
         skipFunding: options.skipFunding,
@@ -3494,6 +3938,7 @@ async function main(): Promise<void> {
         tokenAccount: wallet.tokenAccount.toString(),
         secretPath: wallet.secretPath,
       })),
+      benchmarkScenarios,
       scenarios: scenarioSignatures,
       explorer: Object.fromEntries(
         Object.entries(scenarioSignatures).map(([name, signature]) => [

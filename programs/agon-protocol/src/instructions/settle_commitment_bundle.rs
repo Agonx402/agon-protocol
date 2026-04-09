@@ -303,3 +303,96 @@ pub struct SettleCommitmentBundle<'info> {
     #[account(address = anchor_lang::solana_program::sysvar::instructions::ID)]
     pub instructions_sysvar: UncheckedAccount<'info>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    #[derive(Clone, Debug)]
+    struct BundleModelEntry {
+        payer_id: u32,
+        amount: u64,
+        fee_amount: u64,
+        locked_balance: u64,
+        shared_balance: u64,
+    }
+
+    proptest! {
+        #[test]
+        fn bundle_settlement_preserves_total_value_and_payee_gain(
+            payee_starting_balance in 0u64..=1_000_000u64,
+            fee_recipient_starting_balance in 0u64..=1_000_000u64,
+            raw_entries in prop::collection::vec(
+                (1u64..=250_000u64, 0u64..=50_000u64, 0u64..=250_000u64, 0u64..=250_000u64),
+                1..=6
+            )
+        ) {
+            let entries: Vec<BundleModelEntry> = raw_entries
+                .into_iter()
+                .enumerate()
+                .map(|(index, (amount, fee_amount, locked_balance, shared_balance))| BundleModelEntry {
+                    payer_id: (index + 1) as u32,
+                    amount,
+                    fee_amount,
+                    locked_balance,
+                    shared_balance,
+                })
+                .collect();
+
+            prop_assume!(entries.iter().all(|entry| {
+                entry
+                    .locked_balance
+                    .checked_add(entry.shared_balance)
+                    .map(|available| available >= entry.amount + entry.fee_amount)
+                    .unwrap_or(false)
+            }));
+
+            let fee_recipient_id = 9_999u32;
+            let mut balance_deltas: Vec<ParticipantBalanceDelta> = Vec::new();
+            let mut before_total = payee_starting_balance as u128 + fee_recipient_starting_balance as u128;
+            let mut after_locked_total = 0u128;
+            let mut expected_payee_gain = 0u64;
+            let mut expected_fee_gain = 0u64;
+
+            for entry in &entries {
+                let total_debit = entry.amount + entry.fee_amount;
+                let locked_consumed = entry.locked_balance.min(total_debit);
+                let shared_debit = total_debit - locked_consumed;
+
+                before_total += entry.locked_balance as u128 + entry.shared_balance as u128;
+                after_locked_total += (entry.locked_balance - locked_consumed) as u128;
+                expected_payee_gain += entry.amount;
+                expected_fee_gain += entry.fee_amount;
+
+                add_balance_delta(
+                    &mut balance_deltas,
+                    entry.payer_id,
+                    -(shared_debit as i128),
+                ).unwrap();
+                add_balance_delta(&mut balance_deltas, 55, entry.amount as i128).unwrap();
+                if entry.fee_amount > 0 {
+                    add_balance_delta(
+                        &mut balance_deltas,
+                        fee_recipient_id,
+                        entry.fee_amount as i128,
+                    ).unwrap();
+                }
+            }
+
+            let participant_delta_sum: i128 = balance_deltas.iter().map(|delta| delta.amount_delta).sum();
+            let after_total = after_locked_total
+                + (payee_starting_balance as i128 + find_balance_delta(&balance_deltas, 55)) as u128
+                + (fee_recipient_starting_balance as i128 + find_balance_delta(&balance_deltas, fee_recipient_id)) as u128
+                + entries
+                    .iter()
+                    .map(|entry| (entry.shared_balance as i128 + find_balance_delta(&balance_deltas, entry.payer_id)) as u128)
+                    .sum::<u128>();
+
+            prop_assert_eq!(participant_delta_sum as u128, before_total - after_locked_total - entries.iter().map(|entry| entry.shared_balance as u128).sum::<u128>() - payee_starting_balance as u128 - fee_recipient_starting_balance as u128);
+            prop_assert_eq!(find_balance_delta(&balance_deltas, 55), expected_payee_gain as i128);
+            prop_assert_eq!(find_balance_delta(&balance_deltas, fee_recipient_id), expected_fee_gain as i128);
+            prop_assert_eq!(before_total, after_total);
+        }
+    }
+}

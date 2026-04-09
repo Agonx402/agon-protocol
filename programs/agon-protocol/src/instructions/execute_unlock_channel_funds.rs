@@ -82,3 +82,26 @@ pub struct ExecuteUnlockChannelFunds<'info> {
 
     pub owner: Signer<'info>,
 }
+
+#[cfg(test)]
+mod tests {
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn unlock_release_amount_is_capped_by_remaining_locked_balance(
+            pending_unlock_amount in 1u64..=1_000_000u64,
+            locked_balance in 0u64..=1_000_000u64,
+        ) {
+            let released_amount = pending_unlock_amount.min(locked_balance);
+            let remaining_locked = locked_balance - released_amount;
+
+            prop_assert!(released_amount <= pending_unlock_amount);
+            prop_assert!(released_amount <= locked_balance);
+            prop_assert_eq!(
+                remaining_locked as u128 + released_amount as u128,
+                locked_balance as u128
+            );
+        }
+    }
+}
