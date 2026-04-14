@@ -730,7 +730,7 @@ export function createCrossInstructionMessageEd25519Instruction(
   });
 }
 
-/** Helper to generate cumulative payment commitment message buffer matching the Rust v4 layout. */
+/** Helper to generate cumulative payment commitment message buffer matching the Rust v5 layout. */
 export function createCommitmentMessage(params: {
   payerId: number;
   payeeId: number;
@@ -738,16 +738,12 @@ export function createCommitmentMessage(params: {
   committedAmount?: anchor.BN;
   amount?: anchor.BN;
   authorizedSettler?: PublicKey;
-  feeAmount?: anchor.BN;
-  feeRecipientId?: number;
   messageDomain?: Buffer | Uint8Array;
 }): Buffer {
   const committedAmount = params.committedAmount ?? params.amount;
   expect(committedAmount, "createCommitmentMessage requires committedAmount").to
     .exist;
-  const flags =
-    (params.authorizedSettler ? 1 : 0) |
-    (params.feeAmount && params.feeRecipientId !== undefined ? 2 : 0);
+  const flags = params.authorizedSettler ? 1 : 0;
   const body: number[] = [
     ...encodeCompactU64(BigInt(params.payerId)),
     ...encodeCompactU64(BigInt(params.payeeId)),
@@ -761,15 +757,9 @@ export function createCommitmentMessage(params: {
   if (params.authorizedSettler) {
     bodyBufferParts.push(params.authorizedSettler.toBuffer());
   }
-  if (params.feeAmount && params.feeRecipientId !== undefined) {
-    bodyBufferParts.push(
-      Buffer.from(encodeCompactU64(BigInt(params.feeAmount.toString()))),
-      Buffer.from(encodeCompactU64(BigInt(params.feeRecipientId)))
-    );
-  }
 
   return Buffer.concat([
-    Buffer.from([0x01, 0x04]),
+    Buffer.from([0x01, 0x05]),
     Buffer.from(params.messageDomain ?? TEST_MESSAGE_DOMAIN),
     Buffer.from([flags]),
     ...bodyBufferParts,

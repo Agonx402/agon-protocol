@@ -14,9 +14,9 @@ Replay protection comes from:
 
 Participant IDs are permanent for the lifetime of a deployment, and payment lanes are permanent per `payer_id + payee_id + token_id`.
 
-## `agon-cmt-v4`
+## `agon-cmt-v5`
 
-`agon-cmt-v4` is the unilateral cumulative commitment format used by:
+`agon-cmt-v5` is the unilateral cumulative commitment format used by:
 
 - `settle_individual`
 - `settle_commitment_bundle`
@@ -26,14 +26,13 @@ Participant IDs are permanent for the lifetime of a deployment, and payment lane
 | Offset | Size | Field |
 | ------ | ---- | ----- |
 | `0` | `1` | `message_kind = 0x01` |
-| `1` | `1` | `version = 0x04` |
+| `1` | `1` | `version = 0x05` |
 | `2` | `16` | `message_domain` |
 | `18` | `1` | `flags` |
 
 Flag bits:
 
 - bit `0`: `authorized_settler` present
-- bit `1`: fee fields present
 
 ### Dynamic Body
 
@@ -44,8 +43,6 @@ After the fixed header, fields are encoded in this order:
 3. `token_id` as `u16` little endian
 4. `committed_amount` as compact unsigned varint
 5. optional `authorized_settler` as 32 raw bytes
-6. optional `fee_amount` as compact unsigned varint
-7. optional `fee_recipient_id` as compact unsigned varint
 
 ### Settlement Rules
 
@@ -57,6 +54,10 @@ After the fixed header, fields are encoded in this order:
 - The submitter must be:
   - the payee owner, or
   - the encoded `authorized_settler`
+
+Operator or coordinator compensation is not embedded in the unilateral message.
+If a service flow needs to pay an operator, that payment should be represented as
+its own ordinary lane commitment.
 
 ## `agon-round-v4`
 

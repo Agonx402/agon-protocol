@@ -57,24 +57,3 @@ pub fn apply_balance_delta(
 
     Ok(())
 }
-
-pub fn apply_balance_delta_to_account_info(
-    account_info: &AccountInfo,
-    program_id: &Pubkey,
-    expected_participant_id: u32,
-    token_id: u16,
-    amount_delta: i128,
-) -> Result<()> {
-    if amount_delta == 0 {
-        return Ok(());
-    }
-
-    ParticipantAccount::verify_expected_account(account_info, program_id, expected_participant_id)?;
-
-    let mut participant_data = account_info.try_borrow_mut_data()?;
-    let mut participant = ParticipantAccount::try_deserialize(&mut participant_data.as_ref())?;
-    apply_balance_delta(&mut participant, token_id, amount_delta)?;
-    participant.try_serialize(&mut participant_data.as_mut())?;
-
-    Ok(())
-}

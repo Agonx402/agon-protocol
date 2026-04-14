@@ -444,74 +444,105 @@ describe("Settle Individual", () => {
     );
   });
 
-  it("should settle individual commitment with fee (fresh payer->fresh payee, fee to user1)", async () => {
-    const payer = await createPrimaryFundedParticipant(5_000_000);
-    const payee = await createTestParticipant();
-    const feeRecipient = await fetchParticipant(user1.publicKey);
-    const feeRecipientPda = findParticipantPda(user1.publicKey);
-    const { channelPda, payerParticipantPda, payeeParticipantPda, channel } =
-      await ensureChannel(payer.wallet, payee.wallet.publicKey, 1);
+  it("should pay an operator through a separate seller->operator lane", async () => {
+    const buyer = await createPrimaryFundedParticipant(5_000_000);
+    const seller = await createTestParticipant();
+    const operator = await createTestParticipant();
+    const buyerToSeller = await ensureChannel(
+      buyer.wallet,
+      seller.wallet.publicKey,
+      1
+    );
+    const sellerToOperator = await ensureChannel(
+      seller.wallet,
+      operator.wallet.publicKey,
+      1
+    );
 
-    const feeAmount = 50_000;
     const paymentAmount = 2_000_000;
-    const message = createCommitmentMessage({
-      payerId: channel.payerId,
-      payeeId: channel.payeeId,
-      committedAmount: nextCommitmentAmount(channel, paymentAmount),
+    const operatorFee = 50_000;
+
+    const buyerBefore = await program.account.participantAccount.fetch(
+      buyerToSeller.payerParticipantPda
+    );
+    const sellerBefore = await program.account.participantAccount.fetch(
+      buyerToSeller.payeeParticipantPda
+    );
+    const operatorBefore = await program.account.participantAccount.fetch(
+      sellerToOperator.payeeParticipantPda
+    );
+
+    const buyerMessage = createCommitmentMessage({
+      payerId: buyerToSeller.channel.payerId,
+      payeeId: buyerToSeller.channel.payeeId,
+      committedAmount: nextCommitmentAmount(
+        buyerToSeller.channel,
+        paymentAmount
+      ),
       tokenId: 1,
-      feeAmount: new anchor.BN(feeAmount),
-      feeRecipientId: feeRecipient.participantId,
     });
-
-    const ed25519Ix = Ed25519Program.createInstructionWithPrivateKey({
-      privateKey: payer.wallet.secretKey,
-      message,
-    });
-
-    const payerBefore = await program.account.participantAccount.fetch(
-      payerParticipantPda
-    );
-    const payeeBefore = await program.account.participantAccount.fetch(
-      payeeParticipantPda
-    );
-    const feeRecipientBefore = await program.account.participantAccount.fetch(
-      feeRecipientPda
-    );
 
     await program.methods
       .settleIndividual()
       .accounts({
-        channelState: channelPda,
-        payerAccount: payerParticipantPda,
-        payeeAccount: payeeParticipantPda,
-        submitter: payee.wallet.publicKey,
+        channelState: buyerToSeller.channelPda,
+        payerAccount: buyerToSeller.payerParticipantPda,
+        payeeAccount: buyerToSeller.payeeParticipantPda,
+        submitter: seller.wallet.publicKey,
       } as any)
-      .remainingAccounts([
-        { pubkey: feeRecipientPda, isSigner: false, isWritable: true },
+      .preInstructions([
+        Ed25519Program.createInstructionWithPrivateKey({
+          privateKey: buyer.wallet.secretKey,
+          message: buyerMessage,
+        }),
       ])
-      .preInstructions([ed25519Ix])
-      .signers([payee.wallet])
+      .signers([seller.wallet])
       .rpc();
 
-    const payerAfter = await program.account.participantAccount.fetch(
-      payerParticipantPda
-    );
-    const payeeAfter = await program.account.participantAccount.fetch(
-      payeeParticipantPda
-    );
-    const feeRecipientAfter = await program.account.participantAccount.fetch(
-      feeRecipientPda
-    );
-    const channelAfter = await program.account.channelState.fetch(channelPda);
+    const operatorMessage = createCommitmentMessage({
+      payerId: sellerToOperator.channel.payerId,
+      payeeId: sellerToOperator.channel.payeeId,
+      committedAmount: nextCommitmentAmount(
+        sellerToOperator.channel,
+        operatorFee
+      ),
+      tokenId: 1,
+    });
 
-    expect(availableDelta(payerAfter, payerBefore, 1)).to.equal(
-      -(paymentAmount + feeAmount)
+    await program.methods
+      .settleIndividual()
+      .accounts({
+        channelState: sellerToOperator.channelPda,
+        payerAccount: sellerToOperator.payerParticipantPda,
+        payeeAccount: sellerToOperator.payeeParticipantPda,
+        submitter: operator.wallet.publicKey,
+      } as any)
+      .preInstructions([
+        Ed25519Program.createInstructionWithPrivateKey({
+          privateKey: seller.wallet.secretKey,
+          message: operatorMessage,
+        }),
+      ])
+      .signers([operator.wallet])
+      .rpc();
+
+    const buyerAfter = await program.account.participantAccount.fetch(
+      buyerToSeller.payerParticipantPda
     );
-    expect(availableDelta(payeeAfter, payeeBefore, 1)).to.equal(paymentAmount);
-    expect(availableDelta(feeRecipientAfter, feeRecipientBefore, 1)).to.equal(
-      feeAmount
+    const sellerAfter = await program.account.participantAccount.fetch(
+      buyerToSeller.payeeParticipantPda
     );
-    expect(channelAfter.settledCumulative.toNumber()).to.equal(paymentAmount);
+    const operatorAfter = await program.account.participantAccount.fetch(
+      sellerToOperator.payeeParticipantPda
+    );
+
+    expect(availableDelta(buyerAfter, buyerBefore, 1)).to.equal(-paymentAmount);
+    expect(availableDelta(sellerAfter, sellerBefore, 1)).to.equal(
+      paymentAmount - operatorFee
+    );
+    expect(availableDelta(operatorAfter, operatorBefore, 1)).to.equal(
+      operatorFee
+    );
   });
 
   it("should settle individual commitment with authorized_settler (fresh payer->fresh payee, user1 submits)", async () => {
@@ -563,73 +594,119 @@ describe("Settle Individual", () => {
     expect(availableDelta(payeeAfter, payeeBefore, 1)).to.equal(1_500_000);
   });
 
-  it("should settle individual commitment with fee and authorized_settler (fresh payer->fresh payee, fee to user3, user1 submits)", async () => {
-    const payer = await createPrimaryFundedParticipant(5_000_000);
-    const payee = await createTestParticipant();
-    const feeRecipient = await fetchParticipant(user3.publicKey);
-    const feeRecipientPda = findParticipantPda(user3.publicKey);
-    const { channelPda, payerParticipantPda, payeeParticipantPda, channel } =
-      await ensureChannel(payer.wallet, payee.wallet.publicKey, 1);
+  it("should settle clearing rounds with an operator as an ordinary participant", async () => {
+    const alice = await createPrimaryFundedParticipant(1_000_000);
+    const bob = await createPrimaryFundedParticipant(7_000_000);
+    const jon = await createTestParticipant();
+    const operator = await createTestParticipant();
 
-    const feeAmount = 25_000;
-    const paymentAmount = 2_000_000;
-    const message = createCommitmentMessage({
-      payerId: channel.payerId,
-      payeeId: channel.payeeId,
-      committedAmount: nextCommitmentAmount(channel, paymentAmount),
+    const aliceToOperator = await ensureChannel(
+      alice.wallet,
+      operator.wallet.publicKey,
+      1
+    );
+    const bobToJon = await ensureChannel(bob.wallet, jon.wallet.publicKey, 1);
+    const bobToOperator = await ensureChannel(
+      bob.wallet,
+      operator.wallet.publicKey,
+      1
+    );
+
+    const aliceBefore = await program.account.participantAccount.fetch(
+      alice.participantPda
+    );
+    const bobBefore = await program.account.participantAccount.fetch(
+      bob.participantPda
+    );
+    const jonBefore = await program.account.participantAccount.fetch(
+      jon.participantPda
+    );
+    const operatorBefore = await program.account.participantAccount.fetch(
+      operator.participantPda
+    );
+
+    const message = createClearingRoundMessage({
       tokenId: 1,
-      authorizedSettler: user1.publicKey,
-      feeAmount: new anchor.BN(feeAmount),
-      feeRecipientId: feeRecipient.participantId,
+      blocks: [
+        {
+          participantId: alice.participant.participantId,
+          entries: [
+            {
+              payeeRef: 3,
+              targetCumulative: nextCommitmentAmount(
+                aliceToOperator.channel,
+                250_000
+              ),
+            },
+          ],
+        },
+        {
+          participantId: bob.participant.participantId,
+          entries: [
+            {
+              payeeRef: 2,
+              targetCumulative: nextCommitmentAmount(bobToJon.channel, 4_750_000),
+            },
+            {
+              payeeRef: 3,
+              targetCumulative: nextCommitmentAmount(
+                bobToOperator.channel,
+                750_000
+              ),
+            },
+          ],
+        },
+        {
+          participantId: jon.participant.participantId,
+          entries: [],
+        },
+        {
+          participantId: operator.participant.participantId,
+          entries: [],
+        },
+      ],
     });
-
-    const ed25519Ix = Ed25519Program.createInstructionWithPrivateKey({
-      privateKey: payer.wallet.secretKey,
-      message,
-    });
-
-    const payerBefore = await program.account.participantAccount.fetch(
-      payerParticipantPda
-    );
-    const payeeBefore = await program.account.participantAccount.fetch(
-      payeeParticipantPda
-    );
-    const feeRecipientBefore = await program.account.participantAccount.fetch(
-      feeRecipientPda
-    );
 
     await program.methods
-      .settleIndividual()
+      .settleClearingRound()
       .accounts({
-        channelState: channelPda,
-        payerAccount: payerParticipantPda,
-        payeeAccount: payeeParticipantPda,
-        submitter: user1.publicKey,
+        submitter: alice.wallet.publicKey,
       } as any)
       .remainingAccounts([
-        { pubkey: feeRecipientPda, isSigner: false, isWritable: true },
+        { pubkey: alice.participantPda, isSigner: false, isWritable: true },
+        { pubkey: bob.participantPda, isSigner: false, isWritable: true },
+        { pubkey: jon.participantPda, isSigner: false, isWritable: true },
+        { pubkey: operator.participantPda, isSigner: false, isWritable: true },
+        { pubkey: aliceToOperator.channelPda, isSigner: false, isWritable: true },
+        { pubkey: bobToJon.channelPda, isSigner: false, isWritable: true },
+        { pubkey: bobToOperator.channelPda, isSigner: false, isWritable: true },
       ])
-      .preInstructions([ed25519Ix])
-      .signers([user1])
+      .preInstructions([
+        createMultiSigEd25519Instruction(
+          [alice.wallet, bob.wallet, jon.wallet, operator.wallet],
+          message
+        ),
+      ])
+      .signers([alice.wallet])
       .rpc();
 
-    const payerAfter = await program.account.participantAccount.fetch(
-      payerParticipantPda
+    const aliceAfter = await program.account.participantAccount.fetch(
+      alice.participantPda
     );
-    const payeeAfter = await program.account.participantAccount.fetch(
-      payeeParticipantPda
+    const bobAfter = await program.account.participantAccount.fetch(
+      bob.participantPda
     );
-    const feeRecipientAfter = await program.account.participantAccount.fetch(
-      feeRecipientPda
+    const jonAfter = await program.account.participantAccount.fetch(
+      jon.participantPda
+    );
+    const operatorAfter = await program.account.participantAccount.fetch(
+      operator.participantPda
     );
 
-    expect(availableDelta(payerAfter, payerBefore, 1)).to.equal(
-      -(paymentAmount + feeAmount)
-    );
-    expect(availableDelta(payeeAfter, payeeBefore, 1)).to.equal(paymentAmount);
-    expect(availableDelta(feeRecipientAfter, feeRecipientBefore, 1)).to.equal(
-      feeAmount
-    );
+    expect(availableDelta(aliceAfter, aliceBefore, 1)).to.equal(-250_000);
+    expect(availableDelta(bobAfter, bobBefore, 1)).to.equal(-5_500_000);
+    expect(availableDelta(jonAfter, jonBefore, 1)).to.equal(4_750_000);
+    expect(availableDelta(operatorAfter, operatorBefore, 1)).to.equal(1_000_000);
   });
 
   it("double-charge prevention: settle individual first, then clearing round for same debt fails", async () => {

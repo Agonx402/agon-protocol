@@ -139,8 +139,6 @@ pub struct IndividualSettled {
     pub amount: u64,
     pub committed_amount: u64,
     pub from_locked: bool,
-    pub fee_amount: u64,
-    pub fee_recipient_id: Option<u32>,
 }
 
 #[event]
@@ -149,7 +147,6 @@ pub struct CommitmentBundleSettled {
     pub token_id: u16,
     pub channel_count: u16,
     pub total: u64,
-    pub total_fees: u64,
 }
 
 #[event]

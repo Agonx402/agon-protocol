@@ -892,7 +892,7 @@ function createCommitmentMessage(params: {
     );
   }
   return Buffer.concat([
-    Buffer.from([0x01, 0x04]),
+    Buffer.from([0x01, 0x05]),
     Buffer.from(params.messageDomain),
     Buffer.from([0x00]),
     Buffer.from(encodeCompactU64(BigInt(params.payerId))),

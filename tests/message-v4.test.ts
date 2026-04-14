@@ -62,8 +62,8 @@ async function createPrimaryFundedParticipant(
   };
 }
 
-describe("Message v4", () => {
-  it("settles an individual v4 commitment", async () => {
+describe("Message v5", () => {
+  it("settles an individual v5 commitment", async () => {
     const payer = await createPrimaryFundedParticipant(5_000_000);
     const payee = await createTestParticipant();
     const { channelPda, payerParticipantPda, payeeParticipantPda, channel } =
@@ -117,7 +117,7 @@ describe("Message v4", () => {
     ).to.equal(1_250_000);
   });
 
-  it("settles a bundle of v4 commitments for one payee", async () => {
+  it("settles a bundle of v5 commitments for one payee", async () => {
     const payee = await createTestParticipant();
     const payers = await Promise.all([
       createPrimaryFundedParticipant(6_000_000),
@@ -281,7 +281,7 @@ describe("Message v4", () => {
     ).to.equal(0);
   });
 
-  it("rejects replaying a stale v4 commitment after the lane has already advanced", async () => {
+  it("rejects replaying a stale v5 commitment after the lane has already advanced", async () => {
     const payer = await createPrimaryFundedParticipant(5_000_000);
     const payee = await createTestParticipant();
     const { channelPda, payerParticipantPda, payeeParticipantPda, channel } =

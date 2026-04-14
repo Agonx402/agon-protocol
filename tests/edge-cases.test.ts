@@ -241,45 +241,40 @@ describe("Edge cases", () => {
     );
   });
 
-  it("commitment message format variations work correctly", async () => {
+  it("settle_individual: rejects commitment messages with unsupported trailing bytes", async () => {
     const { channelPda, payerParticipantPda, payeeParticipantPda, channel } =
       await ensureChannel(user1, user4.publicKey, 1);
-    const [feeRecipientParticipantPda] = PublicKey.findProgramAddressSync(
-      [Buffer.from("participant"), user2.publicKey.toBytes()],
-      program.programId
-    );
 
-    const msgWithFee = createCommitmentMessage({
-      payerId: channel.payerId,
-      payeeId: channel.payeeId,
-      amount: nextCommitmentAmount(channel, 1_000_000),
-      tokenId: 1, // primary token
-      feeAmount: new anchor.BN(10_000), // fee in base units
-      feeRecipientId: 1, // user2
-    });
+    const invalidMessage = Buffer.concat([
+      createCommitmentMessage({
+        payerId: channel.payerId,
+        payeeId: channel.payeeId,
+        amount: nextCommitmentAmount(channel, 1_000_000),
+        tokenId: 1,
+      }),
+      Buffer.from([0x09, 0x09]),
+    ]);
 
-    const ed25519IxWithFee = Ed25519Program.createInstructionWithPrivateKey({
+    const ed25519Ix = Ed25519Program.createInstructionWithPrivateKey({
       privateKey: user1.secretKey,
-      message: msgWithFee,
+      message: invalidMessage,
     });
-    await program.methods
-      .settleIndividual()
-      .accounts({
-        channelState: channelPda,
-        payerAccount: payerParticipantPda,
-        payeeAccount: payeeParticipantPda,
-        submitter: user4.publicKey,
-      } as any)
-      .remainingAccounts([
-        {
-          pubkey: feeRecipientParticipantPda,
-          isSigner: false,
-          isWritable: true,
-        },
-      ])
-      .preInstructions([ed25519IxWithFee])
-      .signers([user4])
-      .rpc();
+
+    await expectProgramError(
+      () =>
+        program.methods
+          .settleIndividual()
+          .accounts({
+            channelState: channelPda,
+            payerAccount: payerParticipantPda,
+            payeeAccount: payeeParticipantPda,
+            submitter: user4.publicKey,
+          } as any)
+          .preInstructions([ed25519Ix])
+          .signers([user4])
+          .rpc(),
+      "InvalidCommitmentMessage"
+    );
   });
 
   it("authorized settler validation works correctly", async () => {
@@ -298,6 +293,7 @@ describe("Edge cases", () => {
       privateKey: user1.secretKey,
       message: msg,
     });
+
     await program.methods
       .settleIndividual()
       .accounts({
@@ -311,8 +307,8 @@ describe("Edge cases", () => {
       .rpc();
   });
 
-  it("settle_clearing_round: rejects fee-bearing round messages", async () => {
-    // Placeholder: clearing rounds do not currently support fee-bearing messages.
+  it("settle_clearing_round: operator fees should be modeled as ordinary lanes", async () => {
+    // Placeholder: dedicated coordinator-fee-via-lane coverage lives in settlements.test.ts.
   });
 
   it("settle_clearing_round: rejects InsufficientBalance", async () => {

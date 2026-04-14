@@ -570,22 +570,21 @@ describe("Negative tests — expect specific errors", () => {
     );
   });
 
-  it("settle_individual: rejects FeeRecipientRequired when commitment has fee", async () => {
+  it("settle_individual: rejects commitment messages with unsupported trailing bytes", async () => {
     const payer = await createTestParticipant();
     const payee = await createTestParticipant();
-    const feeRecipient = await createTestParticipant();
     const { channelPda, payerParticipantPda, payeeParticipantPda, channel } =
       await ensureChannel(payer.wallet, payee.wallet.publicKey, 1);
 
-    // commitment message with fee: 75 bytes (commitment_MSG_SIZE_WITH_FEE + 2 for token_id)
-    const msg = createCommitmentMessage({
-      payerId: channel.payerId,
-      payeeId: channel.payeeId,
-      committedAmount: new anchor.BN(2_000_000),
-      tokenId: 1,
-      feeAmount: new anchor.BN(10_000),
-      feeRecipientId: feeRecipient.participant.participantId,
-    });
+    const msg = Buffer.concat([
+      createCommitmentMessage({
+        payerId: channel.payerId,
+        payeeId: channel.payeeId,
+        committedAmount: new anchor.BN(2_000_000),
+        tokenId: 1,
+      }),
+      Buffer.from([0x01, 0x02]),
+    ]);
 
     const ed25519Ix = Ed25519Program.createInstructionWithPrivateKey({
       privateKey: payer.wallet.secretKey,
@@ -605,7 +604,7 @@ describe("Negative tests — expect specific errors", () => {
           .preInstructions([ed25519Ix])
           .signers([payee.wallet])
           .rpc(),
-      "FeeRecipientRequired"
+      "InvalidCommitmentMessage"
     );
   });
 

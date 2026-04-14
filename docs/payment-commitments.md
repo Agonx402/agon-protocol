@@ -50,7 +50,7 @@ use distinct chain ids.
 
 ## Direct Settlement
 
-The signed unilateral message format is `agon-cmt-v4`.
+The signed unilateral message format is `agon-cmt-v5`.
 
 See `docs/client-message-schemas.md` for the exact byte layout.
 
@@ -61,11 +61,16 @@ When a payee settles a commitment, the program:
 3. verifies `payer_id`, `payee_id`, and `token_id`
 4. verifies `committed_amount > settled_cumulative`
 5. computes `delta = committed_amount - settled_cumulative`
-6. debits the payer by the delta plus any fee
+6. debits the payer by the delta
 7. credits the payee internally inside the Agon vault
 8. updates `settled_cumulative`
 
 The payee does not need intermediate checkpoints. The latest valid cumulative commitment is enough.
+
+If an operator or coordinator needs to be paid, that compensation should be
+modeled as an ordinary lane payment such as `seller -> operator` or
+`payer -> coordinator`, not as a special field embedded inside the unilateral
+commitment.
 
 ## Bundle Settlement
 

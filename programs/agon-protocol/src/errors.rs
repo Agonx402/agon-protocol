@@ -56,9 +56,6 @@ pub enum VaultError {
     AccountIdMismatch,
     #[msg("Invalid payment commitment message format")]
     InvalidCommitmentMessage,
-    /// User action: commitment has fee but fee_recipient account not passed in remaining_accounts.
-    #[msg("Fee recipient account required when payment commitment has fee")]
-    FeeRecipientRequired,
     #[msg("Invalid clearing round message format")]
     InvalidClearingRoundMessage,
     #[msg("Net flow sums do not balance")]

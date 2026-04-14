@@ -1,8 +1,7 @@
 use anchor_lang::prelude::*;
 
 use crate::balance_deltas::{
-    add_balance_delta, apply_balance_delta, apply_balance_delta_to_account_info,
-    find_balance_delta, ParticipantBalanceDelta,
+    add_balance_delta, apply_balance_delta, find_balance_delta, ParticipantBalanceDelta,
 };
 use crate::ed25519;
 use crate::errors::VaultError;
@@ -16,18 +15,6 @@ struct BundleEntry {
     channel_index: usize,
     committed_amount: u64,
     locked_consumed: u64,
-}
-
-fn validate_fee_recipient(
-    fee_recipient_info: &AccountInfo,
-    program_id: &Pubkey,
-    expected_participant_id: u32,
-) -> Result<()> {
-    ParticipantAccount::verify_expected_account(
-        fee_recipient_info,
-        program_id,
-        expected_participant_id,
-    )
 }
 
 pub fn handler<'info>(
@@ -49,18 +36,12 @@ pub fn handler<'info>(
     let submitter = ctx.accounts.submitter.key();
 
     let mut token_id: Option<u16> = None;
-    let mut fee_recipient_id: Option<u32> = None;
     let mut total: u64 = 0;
-    let mut total_fees: u64 = 0;
     let mut seen_channel_accounts = Vec::with_capacity(count as usize);
     let mut bundle_entries = Vec::with_capacity(count as usize);
-    let mut payer_ids = Vec::with_capacity(count as usize);
-    let mut balance_deltas: Vec<ParticipantBalanceDelta> = Vec::with_capacity((count as usize) + 2);
-
-    let has_fee_placeholder = remaining.len() == (count as usize * 2) + 1;
-    let pair_offset = usize::from(has_fee_placeholder);
+    let mut balance_deltas: Vec<ParticipantBalanceDelta> = Vec::with_capacity((count as usize) + 1);
     require!(
-        remaining.len() == count as usize * 2 || remaining.len() == (count as usize * 2) + 1,
+        remaining.len() == count as usize * 2,
         VaultError::InvalidCommitmentMessage
     );
 
@@ -91,21 +72,8 @@ pub fn handler<'info>(
                 .unwrap_or(false);
         require!(submitter_ok, VaultError::UnauthorizedSettler);
 
-        if parsed.fee_amount > 0 {
-            match fee_recipient_id {
-                Some(existing) => require!(
-                    existing == parsed.fee_recipient_id,
-                    VaultError::InvalidCommitmentMessage
-                ),
-                None => fee_recipient_id = Some(parsed.fee_recipient_id),
-            }
-            total_fees = total_fees
-                .checked_add(parsed.fee_amount)
-                .ok_or(error!(VaultError::MathOverflow))?;
-        }
-
-        let payer_index = pair_offset + (i * 2);
-        let channel_index = pair_offset + (i * 2) + 1;
+        let payer_index = i * 2;
+        let channel_index = (i * 2) + 1;
         let payer_info = &remaining[payer_index];
         let channel_info = &remaining[channel_index];
 
@@ -173,20 +141,14 @@ pub fn handler<'info>(
             .committed_amount
             .checked_sub(channel.settled_cumulative)
             .ok_or(error!(VaultError::MathOverflow))?;
-        let total_debit = amount
-            .checked_add(parsed.fee_amount)
-            .ok_or(error!(VaultError::MathOverflow))?;
         let total_available = channel
             .locked_balance
             .checked_add(payer_account.get_token_total_balance(parsed.token_id)?)
             .ok_or(error!(VaultError::MathOverflow))?;
-        require!(
-            total_available >= total_debit,
-            VaultError::InsufficientBalance
-        );
+        require!(total_available >= amount, VaultError::InsufficientBalance);
 
-        let locked_consumed = channel.locked_balance.min(total_debit);
-        let shared_debit = total_debit
+        let locked_consumed = channel.locked_balance.min(amount);
+        let shared_debit = amount
             .checked_sub(locked_consumed)
             .ok_or(error!(VaultError::MathOverflow))?;
 
@@ -194,20 +156,12 @@ pub fn handler<'info>(
             .checked_add(amount)
             .ok_or(error!(VaultError::MathOverflow))?;
 
-        payer_ids.push(parsed.payer_id);
         add_balance_delta(
             &mut balance_deltas,
             parsed.payer_id,
             -(shared_debit as i128),
         )?;
         add_balance_delta(&mut balance_deltas, parsed.payee_id, amount as i128)?;
-        if parsed.fee_amount > 0 {
-            add_balance_delta(
-                &mut balance_deltas,
-                parsed.fee_recipient_id,
-                parsed.fee_amount as i128,
-            )?;
-        }
 
         bundle_entries.push(BundleEntry {
             payer_id: parsed.payer_id,
@@ -220,16 +174,6 @@ pub fn handler<'info>(
 
     let batch_token_id = token_id.ok_or(error!(VaultError::InvalidCommitmentMessage))?;
     let payee_id = payee.participant_id;
-    let fee_recipient_id = fee_recipient_id.unwrap_or(0);
-    let fee_recipient_is_existing_participant =
-        total_fees > 0 && (fee_recipient_id == payee_id || payer_ids.contains(&fee_recipient_id));
-
-    if total_fees > 0 && !fee_recipient_is_existing_participant {
-        require!(has_fee_placeholder, VaultError::FeeRecipientRequired);
-        validate_fee_recipient(&remaining[0], program_id, fee_recipient_id)?;
-    } else {
-        require!(!has_fee_placeholder, VaultError::FeeRecipientRequired);
-    }
 
     for entry in &bundle_entries {
         let mut payer_data = remaining[entry.payer_index].try_borrow_mut_data()?;
@@ -258,22 +202,11 @@ pub fn handler<'info>(
         find_balance_delta(&balance_deltas, payee_id),
     )?;
 
-    if total_fees > 0 && !fee_recipient_is_existing_participant {
-        apply_balance_delta_to_account_info(
-            &remaining[0],
-            program_id,
-            fee_recipient_id,
-            batch_token_id,
-            find_balance_delta(&balance_deltas, fee_recipient_id),
-        )?;
-    }
-
     emit!(CommitmentBundleSettled {
         payee_id: payee.participant_id,
         token_id: batch_token_id,
         channel_count: bundle_entries.len() as u16,
         total,
-        total_fees,
     });
 
     Ok(())
@@ -313,7 +246,6 @@ mod tests {
     struct BundleModelEntry {
         payer_id: u32,
         amount: u64,
-        fee_amount: u64,
         locked_balance: u64,
         shared_balance: u64,
     }
@@ -322,19 +254,17 @@ mod tests {
         #[test]
         fn bundle_settlement_preserves_total_value_and_payee_gain(
             payee_starting_balance in 0u64..=1_000_000u64,
-            fee_recipient_starting_balance in 0u64..=1_000_000u64,
             raw_entries in prop::collection::vec(
-                (1u64..=250_000u64, 0u64..=50_000u64, 0u64..=250_000u64, 0u64..=250_000u64),
+                (1u64..=250_000u64, 0u64..=250_000u64, 0u64..=250_000u64),
                 1..=6
             )
         ) {
             let entries: Vec<BundleModelEntry> = raw_entries
                 .into_iter()
                 .enumerate()
-                .map(|(index, (amount, fee_amount, locked_balance, shared_balance))| BundleModelEntry {
+                .map(|(index, (amount, locked_balance, shared_balance))| BundleModelEntry {
                     payer_id: (index + 1) as u32,
                     amount,
-                    fee_amount,
                     locked_balance,
                     shared_balance,
                 })
@@ -344,26 +274,25 @@ mod tests {
                 entry
                     .locked_balance
                     .checked_add(entry.shared_balance)
-                    .map(|available| available >= entry.amount + entry.fee_amount)
+                    .map(|available| available >= entry.amount)
                     .unwrap_or(false)
             }));
 
-            let fee_recipient_id = 9_999u32;
             let mut balance_deltas: Vec<ParticipantBalanceDelta> = Vec::new();
-            let mut before_total = payee_starting_balance as u128 + fee_recipient_starting_balance as u128;
+            let before_total = payee_starting_balance as u128
+                + entries
+                    .iter()
+                    .map(|entry| entry.locked_balance as u128 + entry.shared_balance as u128)
+                    .sum::<u128>();
             let mut after_locked_total = 0u128;
             let mut expected_payee_gain = 0u64;
-            let mut expected_fee_gain = 0u64;
 
             for entry in &entries {
-                let total_debit = entry.amount + entry.fee_amount;
-                let locked_consumed = entry.locked_balance.min(total_debit);
-                let shared_debit = total_debit - locked_consumed;
+                let locked_consumed = entry.locked_balance.min(entry.amount);
+                let shared_debit = entry.amount - locked_consumed;
 
-                before_total += entry.locked_balance as u128 + entry.shared_balance as u128;
                 after_locked_total += (entry.locked_balance - locked_consumed) as u128;
                 expected_payee_gain += entry.amount;
-                expected_fee_gain += entry.fee_amount;
 
                 add_balance_delta(
                     &mut balance_deltas,
@@ -371,27 +300,32 @@ mod tests {
                     -(shared_debit as i128),
                 ).unwrap();
                 add_balance_delta(&mut balance_deltas, 55, entry.amount as i128).unwrap();
-                if entry.fee_amount > 0 {
-                    add_balance_delta(
-                        &mut balance_deltas,
-                        fee_recipient_id,
-                        entry.fee_amount as i128,
-                    ).unwrap();
-                }
             }
 
-            let participant_delta_sum: i128 = balance_deltas.iter().map(|delta| delta.amount_delta).sum();
+            let participant_delta_sum: i128 =
+                balance_deltas.iter().map(|delta| delta.amount_delta).sum();
             let after_total = after_locked_total
                 + (payee_starting_balance as i128 + find_balance_delta(&balance_deltas, 55)) as u128
-                + (fee_recipient_starting_balance as i128 + find_balance_delta(&balance_deltas, fee_recipient_id)) as u128
                 + entries
                     .iter()
-                    .map(|entry| (entry.shared_balance as i128 + find_balance_delta(&balance_deltas, entry.payer_id)) as u128)
+                    .map(|entry| {
+                        (entry.shared_balance as i128
+                            + find_balance_delta(&balance_deltas, entry.payer_id))
+                            as u128
+                    })
                     .sum::<u128>();
 
-            prop_assert_eq!(participant_delta_sum as u128, before_total - after_locked_total - entries.iter().map(|entry| entry.shared_balance as u128).sum::<u128>() - payee_starting_balance as u128 - fee_recipient_starting_balance as u128);
+            prop_assert_eq!(
+                participant_delta_sum as u128,
+                before_total
+                    - after_locked_total
+                    - entries
+                        .iter()
+                        .map(|entry| entry.shared_balance as u128)
+                        .sum::<u128>()
+                    - payee_starting_balance as u128
+            );
             prop_assert_eq!(find_balance_delta(&balance_deltas, 55), expected_payee_gain as i128);
-            prop_assert_eq!(find_balance_delta(&balance_deltas, fee_recipient_id), expected_fee_gain as i128);
             prop_assert_eq!(before_total, after_total);
         }
     }
